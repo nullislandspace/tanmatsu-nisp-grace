@@ -1471,7 +1471,7 @@ The reference set, from the manifest run of 2026-11-01 (the previous set was
 superseded by the fixed internal seed, which regenerates the starfield every
 screen draws its panel over, and by the sheet's new bottom edge): `engineering`
 `e66d7b09` (the same hash at t = 0 and t = 1.5 s, i.e. the sheet is a still
-drawing), `spaceport` `7ecbfbb8`, `designs` `187ab4c4`, `settings` `96b6ddd7`,
+drawing), `spaceport` `d4c881f4`, `designs` `187ab4c4`, `settings` `96b6ddd7`,
 `graphics` `fe500731`, `audio` `7b6eccff`, `display` `3b272a56`. Two runs of
 the manifest in a row produced all eight hashes identically. The title is not
 in the set and cannot be until step 10.5 (F-19).
@@ -1972,6 +1972,17 @@ document if it ever happens:
   ones whose default was also what was written. Found by case 14's
   `encode -> decode -> encode` check, which is the only test in the harness
   that asks the file a question rather than the maths.
+
+- **F-39** 2026-11-01: **the emulator's card was part of the measurement.**
+  The Spaceport hub names the slot and counts the blueprints, the Designs
+  screen *is* the list, and the settings screens show the saved settings, so
+  all three are drawn from whatever the card happens to hold. A save, a
+  blueprint and a settings file left over from playing moved `spaceport` and
+  `designs` with nothing at all changed in the code. `make emu-test` now
+  clears `saves`, `designs` and `settings.txt` from the card before the
+  manifest (`make emu-run` does not, because there the point of the card is
+  that something is saved on it), and two runs in a row then produced all
+  seven hashes identically.
 
 ### Decisions
 

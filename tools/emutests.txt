@@ -18,6 +18,11 @@
 #
 # Read the split and the counts here, not the fps: this is an RV32 interpreter
 # on a PC, not the badge (D-39).
+#
+# The card is empty when this runs: emu-test removes the player data (saves,
+# designs, settings) first, because the Spaceport hub, the Designs list and
+# the settings screens are all drawn from it. A reference hash is only a
+# regression test if the state behind it is the same every time (F-39).
 
 RUN perf scene=title secs=6
 RUN perf scene=space secs=6

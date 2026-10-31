@@ -298,8 +298,22 @@ EMU_TEST_LOG  ?= results/emulator/latest.log
 # one hangs.
 EMU_TEST_SECS ?= 180
 
+# The manifest runs on an empty card (F-39). Some of its screens are drawn
+# from whatever the card holds: the Spaceport hub names the slot and counts
+# the blueprints, Designs IS the list, and the settings screens show the
+# saved settings. Left alone, a run reproduces the last run's card rather
+# than a known state, and a screenshot taken while playing quietly changes
+# the reference set. So the player data goes away before the manifest, and
+# only for emu-test -- `make emu-run` keeps whatever is on the card, because
+# there the point of the card is that you saved something on it.
+EMU_TEST_DATA = saves designs settings.txt
+
 .PHONY: emu-test
 emu-test: emu-install
+	@if [ -d "$(EMU_SD)/nisp" ]; then \
+	  for f in $(EMU_TEST_DATA); do rm -rf "$(EMU_SD)/nisp/$$f"; done; \
+	  echo "--- cleared $(EMU_SD)/nisp of: $(EMU_TEST_DATA)"; \
+	fi
 	@mkdir -p $(dir $(EMU_TEST_LOG))
 	@: > $(EMU_TEST_LOG)
 	@n=0; fail=0; \
