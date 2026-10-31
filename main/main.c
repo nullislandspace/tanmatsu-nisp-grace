@@ -71,6 +71,7 @@
 #include "rocket/design.h"
 #include "save/save.h"
 #include "sim/bodies.h"
+#include "sim/ephemeris.h"
 #include "sim/kepler.h"
 #include "sim/surface.h"
 #include "sim/units.h"
@@ -188,6 +189,41 @@ static void set_content(char const* name) {
 static void flash(char const* msg) {
     snprintf(s_msg, sizeof(s_msg), "%s", msg);
     s_msg_until = showtime_now() + 2.5;
+}
+
+// THE WORLD CLOCK (plan 6.1). The sky is a function of absolute sim time:
+// where Bob and Cheese are, and therefore where the terminator is. A title
+// screen and a Spaceport hub stand somewhere on that clock, and PgUp / PgDn
+// move where they stand, so a launch can be set in daylight instead of at
+// whatever the clock happened to read.
+//
+// It starts at local noon at the pad, which is why a first launch is in the
+// daylight: the pad's own noon is a derived number (sim/ephemeris.h), not a
+// constant somebody had to notice was midnight.
+//
+// A flight does not use it. A mission carries its own clock and warp moves
+// it faster than the show does, so the sky a ship is flying through has to
+// follow the mission -- otherwise the sun, the moon and the ground the ship
+// is standing on are all somewhere else (F-40's other half).
+static double s_world_epoch;
+
+// The absolute sim time this frame's sky belongs to.
+static double sim_time(void) {
+    if (s_flying) return s_mission.t;  // the bench sets its own, in bench_frame
+    return s_world_epoch + (showtime_now() - s_content_t0);
+}
+
+// Wind the world clock by `hours`, and say where it ended up. Only ever
+// asked for while nothing is flying.
+static void shift_world_epoch(float hours) {
+    s_world_epoch += (double)hours * 3600.0;
+    double pad[3];
+    nisp_surface_point(BODY_BOB, s_world_epoch, NISP_PAD_LAT, NISP_PAD_LON, pad);
+    float const clock = nisp_solar_time(BODY_BOB, s_world_epoch, pad);
+    int const hh = (int)clock, mm = (int)((clock - (float)hh) * 60.0f);
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Pad %02d:%02d", hh, mm);
+    flash(msg);
 }
 
 // The mixer follows the settings file (ui/settings.h). The menus apply
@@ -356,7 +392,7 @@ static void go_title(void) {
     s_info = false;
     s_look_yaw = s_look_pitch = 0.0f;
     nisp_scene_init(BENCH_SEED);
-    nisp_camera_title(&s_cam, 0.0);
+    nisp_camera_title(&s_cam, s_world_epoch);
     menu_open_title();
     music_set_context(MUSIC_MENU);
     set_content("title");
@@ -372,7 +408,7 @@ static void open_world(int slot, nisp_game_t const* game) {
     s_flying = false;
     s_look_yaw = s_look_pitch = 0.0f;
     nisp_scene_init(game->seed);
-    nisp_camera_title(&s_cam, 0.0);
+    nisp_camera_title(&s_cam, s_world_epoch);
 
     s_mode = MODE_WORLD;
     menu_open_spaceport(slot);
@@ -382,14 +418,17 @@ static void open_world(int slot, nisp_game_t const* game) {
 
 // A blueprint leaves the pad (plan 5.6). The design is the one that was
 // chosen and not a stand-in, so the pad, the physics and the HUD are the
-// ones the drawing described. The mission clock starts at the launch, which
-// is also where the content clock restarts: t == 0 is standing on the pad.
+// ones the drawing described. The mission inherits the world clock the hub
+// was standing on, so the sky over the pad is the sky that was on screen a
+// moment ago -- and because that clock starts at the pad's own noon, a
+// launch is in the daylight unless the player wound it somewhere else.
+// T+ on the HUD is the mission's own elapsed time, not the absolute clock.
 static void launch_design(nisp_design_t const* design) {
     s_design = *design;
     s_bench = false;
     s_look_yaw = s_look_pitch = 0.0f;
 
-    nisp_mission_launch(&s_mission, &s_design, BODY_BOB, 0.0);
+    nisp_mission_launch(&s_mission, &s_design, BODY_BOB, s_world_epoch);
     nisp_control_init(&s_ctl);
     nisp_mission_readout(&s_mission, &s_readout);
     nisp_camera_chase(&s_cam, &s_mission.ship, 0.0, ship_back_m(&s_mission.ship),
@@ -556,6 +595,11 @@ static void step_flight(nisp_actions_t const mask, nisp_actions_t const pressed,
     fill_control(mask, pressed, (float)dt);
     nisp_mission_step(&s_mission, &s_ctl, dt);
     nisp_mission_readout(&s_mission, &s_readout);
+
+    // A command the mission refused, in the mission's words (plan 6.5). The
+    // news line is the show's own clock, so a refusal stays readable for a
+    // couple of seconds whatever warp was doing.
+    if (s_mission.last_refusal[0] != '\0') flash(s_mission.last_refusal);
 
     // Part N4: the mission decides the context, this decides that the
     // audio layer obeys it. Space above 70 km, silence below 60, and the
@@ -735,6 +779,11 @@ static void on_init(void* user) {
     // win, depth ordering trades a sort against overdraw.
     scene_set_options(&(se_scene_options_t){.frustum_cull = true, .depth_order = true});
 
+    // The world clock starts at the pad's own noon (plan 6.1), which is what
+    // makes a first launch a daylight one.
+    s_world_epoch = nisp_local_noon(BODY_BOB, 0.0, NISP_PAD_LAT, NISP_PAD_LON);
+    ESP_LOGI(TAG, "world clock starts at the pad's noon: %.1f s", s_world_epoch);
+
     go_title();
     devtest_start(&TEST);
 }
@@ -779,7 +828,7 @@ static void on_update(float dt, void* user) {
     menu_cmd_t const cmd = menu_update();
     handle_cmd(&cmd);
 
-    double const t = now - s_content_t0;
+    double const content_t = now - s_content_t0;
 
     // The keyboard is read every frame, menu up or not, so the "which keys
     // went down since the last frame" edge is never stale on the frame a
@@ -827,21 +876,29 @@ static void on_update(float dt, void* user) {
         return;
     }
 
+    // The world clock, on the two screens that have one (plan 6.1). During a
+    // flight the clock warp moves is the mission's, and F3 / F4 are the keys
+    // for that; winding the world from under a flying ship would move the
+    // ground out from under it.
     if (s_mode == MODE_TITLE || s_mode == MODE_WORLD) {
-        nisp_camera_title(&s_cam, t);
+        float const hours = act_held(mask, NISP_BOOST) ? 6.0f : 1.0f;
+        if (act_held(pressed, NISP_TIME_FASTER)) shift_world_epoch(hours);
+        if (act_held(pressed, NISP_TIME_SLOWER)) shift_world_epoch(-hours);
+
+        nisp_camera_title(&s_cam, s_world_epoch + content_t);
         return;
     }
 
     if (s_bench) {
-        bench_frame(t);
-        chase_camera(t);
+        bench_frame(content_t);
+        chase_camera(content_t);
         return;
     }
 
     if (menu_active()) return;  // paused: the mission holds its position
 
     step_flight(mask, pressed, frame_dt);
-    chase_camera(t);
+    chase_camera(s_mission.t);
 
     // The look keys are the camera's, not the ship's: they move where you
     // are looking, not where you are going (plan 6.2).
@@ -867,7 +924,12 @@ static void on_update(float dt, void* user) {
 static void on_render(pax_buf_t* fb, void* user) {
     (void)user;
 
-    double const t = showtime_now() - s_content_t0;
+    // Two clocks, on purpose. The scene is asked where the planets are at the
+    // SIM clock (sim_time), because that is the clock the ship is on; the
+    // wordmark and the menu animate on the SHOW clock, because a title is not
+    // a thing warp should be able to fast-forward.
+    double const t = sim_time();
+    double const content_t = showtime_now() - s_content_t0;
 
     if (s_stream_wanted) {
         s_stream_wanted = false;
@@ -937,7 +999,7 @@ static void on_render(pax_buf_t* fb, void* user) {
 
     prof_begin(PROF_OVERLAY);
     if (s_mode == MODE_TITLE) {
-        if (!menu_in_panel()) title_draw(fb, t);
+        if (!menu_in_panel()) title_draw(fb, content_t);
     } else if (sheet) {
         nisp_builder_draw(fb, &s_builder);
     } else if (s_mode == MODE_WORLD) {
@@ -950,7 +1012,8 @@ static void on_render(pax_buf_t* fb, void* user) {
             .rast_us = rast_us,
             .half    = half,
         };
-        hud_draw(fb, &s_game, s_flying ? &s_mission : NULL, s_flying ? &s_readout : NULL, s_info, &stats);
+        hud_draw(fb, &s_game, s_flying ? &s_mission : NULL, s_flying ? &s_readout : NULL, &s_cam, s_info,
+                  &stats);
         if (s_mode == MODE_PLAY) hud_reticle(fb);
         if (showtime_now() < s_msg_until) hud_flash(fb, s_msg);
     }

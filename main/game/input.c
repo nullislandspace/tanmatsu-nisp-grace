@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #include "bsp/input.h"
+#include "esp_log.h"
 #include "gl_input.h"
 #include "se_bindings.h"
 #include "synthengine3d.h"
@@ -15,6 +16,8 @@
 // How fast the cursor keys turn the view, radians a second. Brisk without
 // being impossible to aim with. A mouse or a gyroscope will not use it.
 #define LOOK_RATE 7.0f
+
+static char const TAG[] = "nisp-input";
 
 // The declared control set. The third column is the action's stable id,
 // what settings.txt keys its binding by: it must never change once a
@@ -30,8 +33,8 @@ static se_binding_def_t const BINDINGS[NISP_ACTION_COUNT] = {
     [NISP_BACK]        = {NISP_BACK, "Pitch up", "back", BSP_INPUT_SCANCODE_S},
     [NISP_LEFT]        = {NISP_LEFT, "Yaw left", "left", BSP_INPUT_SCANCODE_A},
     [NISP_RIGHT]       = {NISP_RIGHT, "Yaw right", "right", BSP_INPUT_SCANCODE_D},
-    [NISP_UP]          = {NISP_UP, "Throttle up", "up", BSP_INPUT_SCANCODE_SPACE},
-    [NISP_DOWN]        = {NISP_DOWN, "Throttle down", "down", BSP_INPUT_SCANCODE_LEFTSHIFT},
+    [NISP_UP]          = {NISP_UP, "Throttle up", "up", BSP_INPUT_SCANCODE_LEFTSHIFT},
+    [NISP_DOWN]        = {NISP_DOWN, "Throttle down", "down", BSP_INPUT_SCANCODE_LEFTCTRL},
     [NISP_BOOST]       = {NISP_BOOST, "Big step", "boost", BSP_INPUT_SCANCODE_RIGHTSHIFT},
     [NISP_LOOK_UP]     = {NISP_LOOK_UP, "Look up", "lookup", BSP_INPUT_SCANCODE_ESCAPED_GREY_UP},
     [NISP_LOOK_DOWN]   = {NISP_LOOK_DOWN, "Look down", "lookdown", BSP_INPUT_SCANCODE_ESCAPED_GREY_DOWN},
@@ -43,16 +46,19 @@ static se_binding_def_t const BINDINGS[NISP_ACTION_COUNT] = {
     [NISP_SCREENSHOT]  = {NISP_SCREENSHOT, "Screenshot", "screenshot", BSP_INPUT_SCANCODE_0},
     [NISP_ROLL_LEFT]   = {NISP_ROLL_LEFT, "Roll left", "rollleft", BSP_INPUT_SCANCODE_Q},
     [NISP_ROLL_RIGHT]  = {NISP_ROLL_RIGHT, "Roll right", "rollright", BSP_INPUT_SCANCODE_E},
-    [NISP_STAGE]       = {NISP_STAGE, "Stage", "stage", BSP_INPUT_SCANCODE_X},
-    [NISP_CUT]         = {NISP_CUT, "Cut engines", "cut", BSP_INPUT_SCANCODE_Z},
+    [NISP_STAGE]       = {NISP_STAGE, "Stage", "stage", BSP_INPUT_SCANCODE_SPACE},
+    [NISP_CUT]         = {NISP_CUT, "Cut engines", "cut", BSP_INPUT_SCANCODE_X},
     [NISP_CHUTE]       = {NISP_CHUTE, "Parachute", "chute", BSP_INPUT_SCANCODE_C},
-    [NISP_LEGS]        = {NISP_LEGS, "Landing legs", "legs", BSP_INPUT_SCANCODE_V},
-    [NISP_SAS]         = {NISP_SAS, "Stability assist", "sas", BSP_INPUT_SCANCODE_B},
-    [NISP_RCS]         = {NISP_RCS, "RCS", "rcs", BSP_INPUT_SCANCODE_N},
+    [NISP_LEGS]        = {NISP_LEGS, "Landing legs", "legs", BSP_INPUT_SCANCODE_G},
+    [NISP_SAS]         = {NISP_SAS, "Stability assist", "sas", BSP_INPUT_SCANCODE_T},
+    [NISP_RCS]         = {NISP_RCS, "RCS", "rcs", BSP_INPUT_SCANCODE_R},
     [NISP_WARP_UP]     = {NISP_WARP_UP, "Warp faster", "warpup", BSP_INPUT_SCANCODE_F3},
     [NISP_WARP_DOWN]   = {NISP_WARP_DOWN, "Warp slower", "warpdown", BSP_INPUT_SCANCODE_F4},
-    [NISP_MAP]         = {NISP_MAP, "Map", "map", BSP_INPUT_SCANCODE_TAB},
+    [NISP_MAP]         = {NISP_MAP, "Map mode", "map", BSP_INPUT_SCANCODE_M},
     [NISP_CONFIRM]     = {NISP_CONFIRM, "Confirm", "confirm", BSP_INPUT_SCANCODE_ENTER},
+    [NISP_FOCUS]       = {NISP_FOCUS, "Cycle focus", "focus", BSP_INPUT_SCANCODE_TAB},
+    [NISP_TIME_FASTER] = {NISP_TIME_FASTER, "Time forward", "timeup", BSP_INPUT_SCANCODE_ESCAPED_GREY_PGUP},
+    [NISP_TIME_SLOWER] = {NISP_TIME_SLOWER, "Time back", "timedn", BSP_INPUT_SCANCODE_ESCAPED_GREY_PGDN},
 };
 
 // The navigation key a scancode ALSO arrives as, where there is one.
@@ -77,6 +83,8 @@ static bsp_input_navigation_key_t nav_for(uint16_t sc) {
         case BSP_INPUT_SCANCODE_F4: return BSP_INPUT_NAVIGATION_KEY_F4;
         case BSP_INPUT_SCANCODE_F5: return BSP_INPUT_NAVIGATION_KEY_F5;
         case BSP_INPUT_SCANCODE_F6: return BSP_INPUT_NAVIGATION_KEY_F6;
+        case BSP_INPUT_SCANCODE_ESCAPED_GREY_PGUP: return BSP_INPUT_NAVIGATION_KEY_PGUP;
+        case BSP_INPUT_SCANCODE_ESCAPED_GREY_PGDN: return BSP_INPUT_NAVIGATION_KEY_PGDN;
         default: return BSP_INPUT_NAVIGATION_KEY_NONE;
     }
 }
@@ -85,6 +93,51 @@ _Static_assert(NISP_ACTION_COUNT <= SE_BINDINGS_MAX,
                "more actions than the engine keeps bindings for: se_bindings_init clamps, and the last "
                "ones would silently never fire");
 
+// Which section each action is presented in (input.h). STORED AS SECTION+1,
+// so a row this file forgot reads as 0 -- unassigned -- instead of landing
+// silently in the first section, which is 0 and would never be noticed.
+// input_init() reports any action that ends up with no section.
+static uint8_t const SECTION[NISP_ACTION_COUNT] = {
+    [NISP_FORWARD]     = NISP_SECTION_FLIGHT + 1,
+    [NISP_BACK]        = NISP_SECTION_FLIGHT + 1,
+    [NISP_LEFT]        = NISP_SECTION_FLIGHT + 1,
+    [NISP_RIGHT]       = NISP_SECTION_FLIGHT + 1,
+    [NISP_UP]          = NISP_SECTION_FLIGHT + 1,
+    [NISP_DOWN]        = NISP_SECTION_FLIGHT + 1,
+    [NISP_BOOST]       = NISP_SECTION_FLIGHT + 1,
+    [NISP_ROLL_LEFT]   = NISP_SECTION_FLIGHT + 1,
+    [NISP_ROLL_RIGHT]  = NISP_SECTION_FLIGHT + 1,
+    [NISP_STAGE]       = NISP_SECTION_FLIGHT + 1,
+    [NISP_CUT]         = NISP_SECTION_FLIGHT + 1,
+    [NISP_CHUTE]       = NISP_SECTION_FLIGHT + 1,
+    [NISP_LEGS]        = NISP_SECTION_FLIGHT + 1,
+    [NISP_SAS]         = NISP_SECTION_FLIGHT + 1,
+    [NISP_RCS]         = NISP_SECTION_FLIGHT + 1,
+
+    [NISP_MAP]         = NISP_SECTION_MAP + 1,
+    [NISP_WARP_UP]     = NISP_SECTION_MAP + 1,
+    [NISP_WARP_DOWN]   = NISP_SECTION_MAP + 1,
+    [NISP_TIME_FASTER] = NISP_SECTION_MAP + 1,
+    [NISP_TIME_SLOWER] = NISP_SECTION_MAP + 1,
+
+    [NISP_CONFIRM]     = NISP_SECTION_ENGINEERING + 1,
+    [NISP_FOCUS]       = NISP_SECTION_ENGINEERING + 1,
+
+    [NISP_LOOK_UP]     = NISP_SECTION_VIEW + 1,
+    [NISP_LOOK_DOWN]   = NISP_SECTION_VIEW + 1,
+    [NISP_LOOK_LEFT]   = NISP_SECTION_VIEW + 1,
+    [NISP_LOOK_RIGHT]  = NISP_SECTION_VIEW + 1,
+
+    [NISP_PAUSE]       = NISP_SECTION_SYSTEM + 1,
+    [NISP_SAVE]        = NISP_SECTION_SYSTEM + 1,
+    [NISP_INFO]        = NISP_SECTION_SYSTEM + 1,
+    [NISP_SCREENSHOT]  = NISP_SECTION_SYSTEM + 1,
+};
+
+static char const* const SECTION_LABEL[NISP_SECTION_COUNT] = {
+    "Flight", "Map and warp", "Engineering", "Camera", "System",
+};
+
 static nisp_actions_t s_last, s_pressed;
 
 void input_init(void) {
@@ -92,6 +145,19 @@ void input_init(void) {
     // settings.txt owns them on disk, where a player can back them up
     // with their saves (se_bindings.h).
     se_bindings_init(&(se_bindings_config_t){.nvs_namespace = NULL, .defs = BINDINGS, .count = NISP_ACTION_COUNT});
+
+    int counts[NISP_SECTION_COUNT] = {0};
+    int unassigned = 0;
+    for (int a = 0; a < NISP_ACTION_COUNT; a++) {
+        int const section = input_action_section((nisp_action_t)a);
+        if (section < 0) unassigned++;
+        else counts[section]++;
+    }
+    ESP_LOGI(TAG, "%d bindings: flight %d, map %d, engineering %d, camera %d, system %d", NISP_ACTION_COUNT,
+             counts[NISP_SECTION_FLIGHT], counts[NISP_SECTION_MAP], counts[NISP_SECTION_ENGINEERING],
+             counts[NISP_SECTION_VIEW], counts[NISP_SECTION_SYSTEM]);
+    if (unassigned > 0)
+        ESP_LOGW(TAG, "%d actions have no Controls section: they cannot be rebound", unassigned);
 }
 
 static bool held(uint16_t sc) {
@@ -194,6 +260,10 @@ char const* input_key_name(uint16_t sc, char* buf, int cap) {
         case BSP_INPUT_SCANCODE_LEFTSHIFT: snprintf(buf, (size_t)cap, "%s", "L-Shift"); return buf;
         case BSP_INPUT_SCANCODE_RIGHTSHIFT: snprintf(buf, (size_t)cap, "%s", "R-Shift"); return buf;
         case BSP_INPUT_SCANCODE_LEFTCTRL: snprintf(buf, (size_t)cap, "%s", "L-Ctrl"); return buf;
+        case BSP_INPUT_SCANCODE_ESCAPED_RCTRL: snprintf(buf, (size_t)cap, "%s", "R-Ctrl"); return buf;
+        case BSP_INPUT_SCANCODE_T: snprintf(buf, (size_t)cap, "%s", "T"); return buf;
+        case BSP_INPUT_SCANCODE_R: snprintf(buf, (size_t)cap, "%s", "R"); return buf;
+        case BSP_INPUT_SCANCODE_M: snprintf(buf, (size_t)cap, "%s", "M"); return buf;
         case BSP_INPUT_SCANCODE_ESCAPED_GREY_UP: snprintf(buf, (size_t)cap, "%s", "Up"); return buf;
         case BSP_INPUT_SCANCODE_ESCAPED_GREY_DOWN: snprintf(buf, (size_t)cap, "%s", "Down"); return buf;
         case BSP_INPUT_SCANCODE_ESCAPED_GREY_LEFT: snprintf(buf, (size_t)cap, "%s", "Left"); return buf;
@@ -216,4 +286,34 @@ char const* input_key_name(uint16_t sc, char* buf, int cap) {
     }
     snprintf(buf, (size_t)cap, "0x%04x", (unsigned)sc);
     return buf;
+}
+
+int input_action_section(nisp_action_t a) {
+    if (a < 0 || a >= NISP_ACTION_COUNT) return -1;
+    uint8_t const packed = SECTION[a];
+    return (packed == 0) ? -1 : (int)packed - 1;
+}
+
+char const* input_section_label(int section) {
+    if (section < 0 || section >= NISP_SECTION_COUNT) return "?";
+    return SECTION_LABEL[section];
+}
+
+int input_section_row_count(int section) {
+    if (section < 0 || section >= NISP_SECTION_COUNT) return 0;
+    int n = 0;
+    for (int a = 0; a < NISP_ACTION_COUNT; a++) {
+        if (input_action_section((nisp_action_t)a) == section) n++;
+    }
+    return n;
+}
+
+int input_section_action(int section, int row) {
+    if (section < 0 || section >= NISP_SECTION_COUNT || row < 0) return -1;
+    for (int a = 0; a < NISP_ACTION_COUNT; a++) {
+        if (input_action_section((nisp_action_t)a) != section) continue;
+        if (row == 0) return a;
+        row--;
+    }
+    return -1;
 }

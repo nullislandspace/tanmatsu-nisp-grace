@@ -161,6 +161,11 @@ typedef struct {
     float incl_deg;
     bool  escaped;     // hyperbolic with respect to `body`
 
+    // Seconds to the next apoapsis / periapsis passage (plan 6.1). Always
+    // forward: nisp_time_to_apsis wraps into [0, period). -1 when the apsis
+    // does not exist, which is apoapsis on a hyperbola.
+    float time_to_ap_s, time_to_pe_s;
+
     float nose_up_dot;  // nose . local up: +1 straight up, -1 straight down
     float authority_knm;  // what the control system can spend right now
 } nisp_readout_t;

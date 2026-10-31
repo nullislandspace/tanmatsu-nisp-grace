@@ -268,7 +268,7 @@ nisp_build_cmd_kind_t nisp_builder_step(nisp_builder_t* b, nisp_actions_t presse
 
     // TAB cycles the ring, from anywhere, and closes the parameter editor on
     // the way out -- a sub-mode must never trap the player.
-    if (act_held(pressed, NISP_MAP)) {
+    if (act_held(pressed, NISP_FOCUS)) {
         if (b->params_open) {
             b->params_open = false;
         } else {

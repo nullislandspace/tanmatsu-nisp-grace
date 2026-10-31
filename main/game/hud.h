@@ -16,7 +16,7 @@
 //  ship. Left is where the ship is and how it is moving; right is where
 //  it is going. The bottom centre is the engine: throttle, stage, warp.
 //
-//  The INFO key adds the diagnostic block -- seed, slot, renderer
+//  The INFO key adds the diagnostic block -- slot, renderer
 //  settings, primitive counts -- the one a bug report quotes.
 // =====================================================================
 
@@ -25,6 +25,7 @@
 #include "pax_gfx.h"
 #include "flight/mission.h"
 #include "flight/physics.h"
+#include "game/scene.h"
 #include "save/save.h"
 
 typedef struct {
@@ -42,8 +43,14 @@ typedef struct {
 
 // `mission` and `readout` may both be NULL -- a menu over a frozen view
 // has nothing to report -- in which case only the world's name shows.
+//
+// `cam` is this frame's camera, and it is what the attitude markers are
+// drawn against: prograde and friends are directions in the world, and
+// whether they are on screen and where they are is a question about the
+// camera, not about the ship (plan 6.2). NULL draws the numbers without
+// them.
 void hud_draw(pax_buf_t* fb, nisp_game_t const* game, nisp_mission_t const* mission,
-              nisp_readout_t const* readout, bool info, hud_stats_t const* stats);
+              nisp_readout_t const* readout, nisp_camera_t const* cam, bool info, hud_stats_t const* stats);
 
 // A centre reticle: the ship points where the crosshair is.
 void hud_reticle(pax_buf_t* fb);

@@ -9,11 +9,14 @@
 #include <string.h>
 
 #include "game/scene.h"
+#include "rocket/parts.h"
 #include "rocket/stack.h"
 #include "se_config.h"  // DISPLAY_LOG_W / DISPLAY_LOG_H
 #include "se_scene.h"
 #include "se_text.h"
 #include "sim/bodies.h"
+#include "sim/ephemeris.h"
+#include "sim/surface.h"
 #include "ui/settings.h"
 
 // Text is drawn twice, dark under light, because the scene behind it can
@@ -126,6 +129,197 @@ static void bar(pax_buf_t* fb, float x, float y, float w, float h, float frac, u
     pax_draw_line(fb, 0xff8fa0a8u, x + w, y, x + w, y + h);
 }
 
+// --- The attitude indicator (plan 6.2) ------------------------------------
+//
+// Prograde, retrograde and the orbit normal are directions in the world, not
+// parts of the ship, so where they land on screen is a question about the
+// camera and nothing else. They are projected through the same pinhole the
+// scene rasterizes with: a direction is a point one unit out along it from
+// the eye, and the engine's projection of that point is where the marker
+// goes. A direction behind the eye has no screen position and is not drawn.
+//
+// A marker whose projection lands off the sky is pulled in along its own
+// bearing, because "it is that way, further out" is the reading a pilot needs
+// -- and it is pulled in to the rectangle no readout is using, so a marker
+// never lands on a number.
+#define SKY_MIN_X 130.0f
+#define SKY_MAX_X 670.0f
+#define SKY_MIN_Y 56.0f
+#define SKY_MAX_Y 344.0f
+#define MARK_R    8.0f
+
+typedef struct {
+    // Frame axes at the camera: local up, north, east.
+    double l_up[3], l_north[3], l_east[3];
+    // Engine-space camera axes, rebuilt from the camera's own yaw / pitch /
+    // roll with the formulas se_scene.c builds its basis from, so a marker
+    // lands on the scene that was drawn with them.
+    float cam_right[3], cam_up[3], cam_fwd[3];
+} view_t;
+
+static void view_at(nisp_camera_t const* cam, view_t* v) {
+    nisp_local_frame(cam->frame_body, cam->pos_km, v->l_up, v->l_north, v->l_east);
+    float const cy = cosf(cam->yaw), sy = sinf(cam->yaw);
+    float const cp = cosf(cam->pitch), sp = sinf(cam->pitch);
+    float const cr = cosf(cam->roll), sr = sinf(cam->roll);
+    v->cam_right[0] = cy * cr + sy * sp * sr;
+    v->cam_right[1] = cp * sr;
+    v->cam_right[2] = -sy * cr + cy * sp * sr;
+    v->cam_up[0] = -cy * sr + sy * sp * cr;
+    v->cam_up[1] = cp * cr;
+    v->cam_up[2] = sy * sr + cy * sp * cr;
+    v->cam_fwd[0] = sy * cp;
+    v->cam_fwd[1] = -sp;
+    v->cam_fwd[2] = cy * cp;
+}
+
+static float dot_df(double const a[3], float const b[3]) {
+    return (float)(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
+}
+static float dot_ff(float const a[3], float const b[3]) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+// A frame-axis unit direction to a screen position. False when it is behind
+// the eye, where there is nothing to mark.
+static bool project_dir(view_t const* v, float const d[3], float* out_x, float* out_y) {
+    // The local frame maps onto the engine's space as (east, up, -north):
+    // the same mapping game/scene.c submits every vertex with.
+    float const e[3] = {dot_df(v->l_east, d), dot_df(v->l_up, d), -dot_df(v->l_north, d)};
+    float const cx = dot_ff(v->cam_right, e), cy = dot_ff(v->cam_up, e), cz = dot_ff(v->cam_fwd, e);
+    if (cz < -1e-4f) return false;  // behind the eye
+    if (cz <= 1e-4f) {
+        // Exactly to the side: the pinhole has no finite answer for it, but
+        // the bearing on screen is still (cx, -cy), and that is what is worth
+        // showing. Placed far out so the clamp below puts it on the edge.
+        float const m = sqrtf(cx * cx + cy * cy);
+        if (m < 1e-4f) return false;  // ahead or behind along the axis: nothing to say
+        *out_x = RENDER_HALF_W + 1000.0f * cx / m;
+        *out_y = RENDER_HORIZON_Y - 1000.0f * cy / m;
+        return true;
+    }
+    float const inv = 1.0f / cz;
+    *out_x = RENDER_HALF_W + RENDER_FOCAL_LEN * cx * inv;
+    *out_y = RENDER_HORIZON_Y - RENDER_FOCAL_LEN * cy * inv;
+    return true;
+}
+
+// Pull a marker in to the edge of the sky area, along its own bearing from
+// the projection centre, so the bearing is what survives the clamp. True when
+// it moved.
+static bool clamp_marker(float* x, float* y) {
+    float const ox = RENDER_HALF_W, oy = RENDER_HORIZON_Y;
+    float dx = *x - ox, dy = *y - oy;
+    float const hx = SKY_MAX_X - ox;  // the area is symmetric left to right
+    float const hy_up = oy - SKY_MIN_Y, hy_dn = SKY_MAX_Y - oy;
+    float k = 1.0f;
+    if (fabsf(dx) > hx) k = fminf(k, hx / fabsf(dx));
+    if (dy < 0.0f && -dy > hy_up) k = fminf(k, hy_up / -dy);
+    if (dy > 0.0f && dy > hy_dn) k = fminf(k, hy_dn / dy);
+    if (k >= 1.0f) return false;
+    *x = ox + dx * k;
+    *y = oy + dy * k;
+    return true;
+}
+
+static uint32_t dimmed(uint32_t c) {
+    uint32_t const r = ((c >> 16) & 0xffu) / 2u, g = ((c >> 8) & 0xffu) / 2u, b = (c & 0xffu) / 2u;
+    return 0xff000000u | (r << 16) | (g << 8) | b;
+}
+
+// A marker: a triangle whose point faces away from the middle of the screen,
+// because the point is the direction, with a short label on the inside of it.
+// A clamped marker is drawn dimmer -- it is a bearing, not a place.
+static void marker(pax_buf_t* fb, view_t const* v, float const d[3], char const* label, uint32_t col) {
+    float x, y;
+    if (!project_dir(v, d, &x, &y)) return;
+    uint32_t const c = clamp_marker(&x, &y) ? dimmed(col) : col;
+
+    float dx = x - RENDER_HALF_W, dy = y - RENDER_HORIZON_Y;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 1.0f) {
+        dx = 0.0f;
+        dy = -1.0f;
+    } else {
+        dx /= len;
+        dy /= len;
+    }
+    float const px = -dy, py = dx;  // across the bearing
+    float const tx = x + dx * MARK_R, ty = y + dy * MARK_R;
+    float const b1x = x - dx * MARK_R + px * MARK_R * 0.7f, b1y = y - dy * MARK_R + py * MARK_R * 0.7f;
+    float const b2x = x - dx * MARK_R - px * MARK_R * 0.7f, b2y = y - dy * MARK_R - py * MARK_R * 0.7f;
+    pax_draw_line(fb, c, tx, ty, b1x, b1y);
+    pax_draw_line(fb, c, b1x, b1y, b2x, b2y);
+    pax_draw_line(fb, c, b2x, b2y, tx, ty);
+
+    pax_vec2f const sz = rendertext_size(NULL, 12.0f, label);
+    text(fb, c, 12.0f, x - dx * (MARK_R + 9.0f) - sz.x * 0.5f, y - dy * (MARK_R + 9.0f) - sz.y * 0.5f, label);
+}
+
+static void draw_attitude(pax_buf_t* fb, nisp_mission_t const* m, nisp_camera_t const* cam) {
+    view_t v;
+    view_at(cam, &v);
+
+    float d[3];
+    nisp_vessel_prograde(&m->ship, d);
+    marker(fb, &v, d, "PRO", 0xff70e870u);
+    for (int i = 0; i < 3; i++) d[i] = -d[i];
+    marker(fb, &v, d, "RET", 0xffe87070u);
+
+    nisp_vessel_normal(&m->ship, d);
+    marker(fb, &v, d, "NRM", 0xff9fb0f0u);
+}
+
+// The stability readout as a picture (plan 6.6, D-37): the stack nose to tail
+// as a line, with the centre of mass, the drag centre and the centre of
+// thrust ticked on it. The signed number in the left column is the same fact;
+// this is the form a player watches change, which is how the dart case gets
+// taught instead of being explained -- the drag mark crossing the mass mark
+// as a stage empties is the dart being assembled in front of them.
+#define STRIP_X  14.0f
+#define STRIP_W  176.0f
+#define STRIP_Y  372.0f
+
+// `shape` is 0 for the mass square, +1 for a mark pointing down, -1 for one
+// pointing up. The three marks have to be tellable apart at a glance, and they
+// are often close enough together that colour alone will not do it.
+static void strip_mark(pax_buf_t* fb, float along, float x0, float span, uint32_t col, int shape) {
+    float t = (along - x0) / span;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    float const x = STRIP_X + STRIP_W * t;
+    if (shape == 0) {
+        pax_draw_rect(fb, col, x - 2.5f, STRIP_Y - 2.5f, 5.0f, 5.0f);
+        return;
+    }
+    float const s = (float)shape;
+    pax_draw_line(fb, col, x - 4.0f, STRIP_Y - 6.0f * s, x + 4.0f, STRIP_Y - 6.0f * s);
+    pax_draw_line(fb, col, x - 4.0f, STRIP_Y - 6.0f * s, x, STRIP_Y + 2.0f * s);
+    pax_draw_line(fb, col, x + 4.0f, STRIP_Y - 6.0f * s, x, STRIP_Y + 2.0f * s);
+}
+
+static void draw_stability(pax_buf_t* fb, nisp_stack_t const* s) {
+    if (s->count <= 0) return;
+    float const x0 = s->part[0].x0, x1 = s->part[s->count - 1].x1;
+    float const span = x1 - x0;
+    if (!(span > 0.0f)) return;
+
+    text(fb, 0xff7f8f98u, 14.0f, STRIP_X, STRIP_Y - 20.0f, "STABILITY");
+    pax_draw_line(fb, 0xff8fa0a8u, STRIP_X, STRIP_Y, STRIP_X + STRIP_W, STRIP_Y);
+    pax_draw_line(fb, 0xff8fa0a8u, STRIP_X, STRIP_Y - 9.0f, STRIP_X, STRIP_Y + 9.0f);
+    pax_draw_line(fb, 0xff8fa0a8u, STRIP_X + STRIP_W, STRIP_Y - 9.0f, STRIP_X + STRIP_W, STRIP_Y + 9.0f);
+
+    strip_mark(fb, s->com_x, x0, span, 0xffffffffu, 0);
+    strip_mark(fb, s->cp_x, x0, span, 0xffe8a050u, 1);
+    if (s->cot_x > 0.0f) strip_mark(fb, s->cot_x, x0, span, 0xff8fd8f0u, -1);
+
+    // The legend is three words, each in the colour of its mark: short enough
+    // to read at a glance, and it says which end of the stack is which.
+    text(fb, 0xffffffffu, 12.0f, STRIP_X, STRIP_Y + 12.0f, "MASS");
+    text(fb, 0xffe8a050u, 12.0f, STRIP_X + 42.0f, STRIP_Y + 12.0f, "DRAG");
+    text(fb, 0xff8fd8f0u, 12.0f, STRIP_X + 86.0f, STRIP_Y + 12.0f, "THRUST");
+}
+
 // The two columns. Left is the here: where the ship is and how it is
 // moving through whatever it is moving through. Right is the there: the
 // orbit it is on, which is the only prediction the game makes.
@@ -140,6 +334,16 @@ static void draw_columns(pax_buf_t* fb, nisp_mission_t const* m, nisp_readout_t 
 
     fmt_alt(line, sizeof(line), r->alt_km);
     kv(fb, COL_L, y, "ALT", line, 0xffffffffu);
+    y += COL_DY;
+
+    // The clock the sky is on above the ship (plan 6.1). It is lit or it is
+    // not, and the row is coloured by the sun's height rather than by the
+    // hour, so a ship over the terminator reads as what it is.
+    int mins = (int)(nisp_solar_time(m->ship.body, m->t, m->ship.pos_km) * 60.0f + 0.5f) % (24 * 60);
+    if (mins < 0) mins += 24 * 60;
+    snprintf(line, sizeof(line), "%02d:%02d", mins / 60, mins % 60);
+    kv(fb, COL_L, y, "LOCAL", line,
+       nisp_sun_elevation(m->ship.body, m->t, m->ship.pos_km) > 0.0f ? 0xffe8d8a0u : 0xff9fb0b8u);
     y += COL_DY;
 
     fmt_speed(line, sizeof(line), r->speed_ms);
@@ -196,8 +400,27 @@ static void draw_columns(pax_buf_t* fb, nisp_mission_t const* m, nisp_readout_t 
     }
     y += COL_DY;
 
+    // Seconds to the next apoapsis, under the apoapsis it counts down to.
+    // A hyperbola has no apoapsis to reach, and says so twice rather than
+    // showing a number that means nothing (plan 6.1).
+    if (r->escaped || r->time_to_ap_s < 0.0f) {
+        kv(fb, COL_R, y, "T+AP", "-", 0xff5f6f78u);
+    } else {
+        fmt_period(line, sizeof(line), r->time_to_ap_s);
+        kv(fb, COL_R, y, "T+AP", line, 0xff9fb0b8u);
+    }
+    y += COL_DY;
+
     fmt_alt(line, sizeof(line), r->periapsis_km);
     kv(fb, COL_R, y, "PERI", line, r->periapsis_km < 70.0f ? 0xffe8c8a0u : 0xffb0d8f0u);
+    y += COL_DY;
+
+    if (r->time_to_pe_s < 0.0f) {
+        kv(fb, COL_R, y, "T+PE", "-", 0xff5f6f78u);
+    } else {
+        fmt_period(line, sizeof(line), r->time_to_pe_s);
+        kv(fb, COL_R, y, "T+PE", line, 0xff9fb0b8u);
+    }
     y += COL_DY;
 
     if (r->escaped) {
@@ -244,19 +467,31 @@ static void draw_controls(pax_buf_t* fb, nisp_mission_t const* m, nisp_readout_t
     // until there is heat worth watching, so a coast is not decorated with
     // an empty bar.
     if (r->heat_max > 0.02f) {
-        snprintf(line, sizeof(line), "%.0f%%", (double)(r->heat_max * 100.0f));
         uint32_t const col =
             r->heat_max > 0.75f ? 0xffe85050u : (r->heat_max > 0.4f ? 0xffe8a050u : 0xffe8d070u);
+        // Past 70 % the bar stops being enough: which part is going is the
+        // thing a player can still act on, and the name is the whole point of
+        // showing it at all (plan 6.5).
+        char const* who = "";
+        if (r->heat_max > 0.70f && r->heat_part >= 0 && r->heat_part < s->count) {
+            who = nisp_part_row(s->part[r->heat_part].kind)->name;
+        }
+        snprintf(line, sizeof(line), "%.0f%% %s", (double)(r->heat_max * 100.0f), who);
         bar_row(fb, 358.0f, "HEAT", r->heat_max, col, line);
     }
 
     // One line of state: which stage is armed, what the control system is
     // doing, and what has already been let go. All of it is a word rather
     // than a number, because it is read as "is this what I meant".
-    char status[128];
-    snprintf(status, sizeof(status), "stage %d/%d   SAS %s   %s%s%s", s->live_stage + 1, s->stage_count,
+    char pieces[32] = "";
+    if (m->debris_count > 0) {
+        snprintf(pieces, sizeof(pieces), "   %d loose piece%s", m->debris_count,
+                 m->debris_count == 1 ? "" : "s");
+    }
+    char status[160];
+    snprintf(status, sizeof(status), "stage %d/%d   SAS %s   %s%s%s%s", s->live_stage + 1, s->stage_count,
              nisp_sas_name(m->sas), m->rcs ? "RCS on" : "RCS off", s->parachute ? "   chute" : "",
-             nisp_stack_legs_deployed(s, s->live_stage) ? "   legs" : "");
+             nisp_stack_legs_deployed(s, s->live_stage) ? "   legs" : "", pieces);
     pax_vec2f const sz = rendertext_size(NULL, 14.0f, status);
     text(fb, 0xffc8d8e0u, 14.0f, ((float)DISPLAY_LOG_W - sz.x) * 0.5f, 398.0f, status);
 
@@ -269,20 +504,25 @@ static void draw_controls(pax_buf_t* fb, nisp_mission_t const* m, nisp_readout_t
 }
 
 void hud_draw(pax_buf_t* fb, nisp_game_t const* game, nisp_mission_t const* mission,
-              nisp_readout_t const* readout, bool info, hud_stats_t const* stats) {
+              nisp_readout_t const* readout, nisp_camera_t const* cam, bool info,
+              hud_stats_t const* stats) {
     if (fb == NULL || game == NULL) return;
 
     char line[96];
 
-    // Top left: which world this is. There is no seed to show any more --
-    // the sky is the same sky for every slot (D-50) -- and block 6 will
-    // fill this corner with the vessel's name instead.
-    text(fb, 0xffffffffu, 20.0f, 14.0f, 12.0f, game->name);
+    // Top left: what the ship is called, which is the name the player gave it
+    // in Engineering (plan 6.1). A mission with no name -- a scripted case, a
+    // slot from before names existed -- falls back to the world's name, which
+    // is also what a menu over a frozen view has to show.
+    char const* name = game->name;
+    if (mission != NULL && mission->vessel_name[0] != '\0') name = mission->vessel_name;
+    text(fb, 0xffffffffu, 20.0f, 14.0f, 12.0f, name);
 
     if (mission == NULL || readout == NULL) return;
 
-    // Top right: the mission clock and where the flight is.
-    fmt_clock(line, sizeof(line), mission->t);
+    // Top right: the mission clock -- T+ from the moment this flight started,
+    // not the absolute sim clock, which is a number no flight is measured by.
+    fmt_clock(line, sizeof(line), mission->t - mission->t_launch);
     pax_vec2f sz = rendertext_size(NULL, 16.0f, line);
     text(fb, 0xffd8e0e8u, 16.0f, (float)DISPLAY_LOG_W - sz.x - 14.0f, 12.0f, line);
 
@@ -303,6 +543,13 @@ void hud_draw(pax_buf_t* fb, nisp_game_t const* game, nisp_mission_t const* miss
 
     draw_columns(fb, mission, readout);
     draw_controls(fb, mission, readout);
+
+    // The attitude markers need this frame's camera, and a caller that has
+    // none (a menu over a frozen view) gets the numbers without them.
+    if (cam != NULL) draw_attitude(fb, mission, cam);
+    // The stability strip is an aerodynamic picture, so it only means
+    // something while there is air to be aerodynamic in (plan 6.6).
+    if (readout->in_air) draw_stability(fb, &mission->ship.stack);
 
     if (!info) return;
 

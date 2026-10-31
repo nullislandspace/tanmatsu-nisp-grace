@@ -1450,7 +1450,7 @@ answer next to it:
     pod's own pods are a control module of their own after everything below
     has gone.
 
-Cases 1-6 and 9-14 are in `tools/nispcheck.c` today (446 checks). Cases 7 and 8
+Cases 1-6 and 9-15 are in `tools/nispcheck.c` today (471 checks). Cases 7 and 8
 are written down before they exist, because they are the acceptance test for the
 planner in block 8 -- the planner gets written when its test is already
 described.
@@ -1557,13 +1557,13 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 5.10 | Debris: ballistic bodies, capped at `NISP_DEBRIS_MAX`, each still heated and each allowed to fail once | done | 2026-11-01. `NISP_DEBRIS_MAX 8` in `main/flight/mission.h`, oldest retired first. Debris is never controlled, so it coasts whenever it is free (F-31) and is heated on the same path as the ship. Drawn in the chase view; map mode arrives with Part 7. |
 | | **Accept:** a scripted launch reaches a stable 100 km orbit; a planned deorbit lands under chute on Bob and survives; a Cheese landing survives **on legs** and the same stack without legs wrecks; a too-steep deorbit loses the pod and the mission ends in the air; a reentry with the burnt-out stage still attached is stable, dart-shaped, and still cooks the capsule | done | 2026-11-01, host-scripted (`nispcheck` case 13, 383 checks overall): a 61.228 t launcher at 1.499 TWR spends 7,697 m/s over 150.1 s to reach space, circularises with a 127.6 m/s burn at apoapsis into an orbit 1.269 km round at a 299.1 km periapsis, comes down under a canopy at 8.806 m/s, and lands on Cheese at 11.007 m/s -- survivable on legs, fatal without them. The dart case is case 10's, measured rather than asserted. |
 | **6** | **HUD and controls** | | |
-| 6.1 | Orbital readouts: altitude, surface and orbital speed, Ap / Pe, period, time to Ap / Pe, inclination, current SOI, warp factor | todo | Replaces the island's MARK readout. |
-| 6.2 | Attitude indicator: prograde / retrograde / normal markers, the burn vector when a node is armed | todo | |
-| 6.3 | Throttle, staging, warp, SAS keys, all of them bindings in Settings -> Controls | todo | The action enum is append-only (`game/input.h`): reordering moves every saved binding. |
-| 6.4 | Mode indicators: SAS on/off and its reference, auto-guidance armed, delta-v remaining on the armed node | todo | |
-| 6.5 | Heat readout: the hottest part as a bar against its limit, named when it passes 70 %, and a fragment count when the stack has split | todo | Part F5. A failure the player cannot see is a failure they cannot learn from. |
-| 6.6 | Stability readout: the static margin as a signed number in metres, with the drag centre and CoM marked on the attitude indicator | todo | Part A5. This is where the game teaches the dart case -- the player watches the number cross zero as a stage empties, instead of being told it in Engineering (D-37). |
-| | **Accept:** every number a flight needs is on screen, and every key that changes it is remappable | todo | |
+| 6.1 | Orbital readouts: altitude, surface and orbital speed, Ap / Pe, period, time to Ap / Pe, inclination, current SOI, warp factor | done | 2026-11-01. `main/game/hud.c` draws both columns: left is ALT / LOCAL / SPEED / V AIR or V GND / Q / MASS / TWR / MARGIN, right is APO / T+AP / PERI / T+PE / PERIOD / INCL / SOI / WARP, eight rows each at a fixed pitch so the numbers do not move when the flight changes. `nisp_time_to_apsis` feeds the two countdowns (`flight/physics.c`); LOCAL is `nisp_solar_time` coloured by `nisp_sun_elevation` (F-40). The clock is T+ from `mission.t_launch`, not the absolute sim clock. |
+| 6.2 | Attitude indicator: prograde / retrograde / normal markers, the burn vector when a node is armed | in progress | 2026-11-01. PRO / RET / NRM are projected through the engine's own pinhole (`hud.c` `view_at` / `project_dir`), the camera basis rebuilt from yaw / pitch / roll with `se_scene.c`'s formulas and the local frame mapped as (east, up, -north) exactly as `game/scene.c` maps its geometry -- so a marker lands on the scene that was drawn with them. Behind the eye: not drawn. Exactly to the side: no finite projection, so it is placed along its screen bearing and clamped to the edge of the sky, dimmed, because "that way, further out" is the reading. Measured in the emulator on the bench, where the nose is along the velocity: PRO at the pinhole centre (400, 256), NRM clamped to the right edge, RET absent. The burn vector waits on block 7's nodes. |
+| 6.3 | Throttle, staging, warp, SAS keys, all of them bindings in Settings -> Controls | done | 2026-11-01. KSP-like defaults -- WASD plus QE steer, L-Shift / L-Ctrl throttle, R-Shift boost, SPACE stage, X cut, C chute, G legs, T SAS, R RCS, M map, F3 / F4 warp, TAB focus, PgUp / PgDn time -- and 30 bindings in five rebinding sections (Flight 15, Map and warp 5, Engineering 2, Camera 4, System 4), reached Settings -> Controls -> section -> key (`ui/menu.c` `SCR_CONTROLS` / `SCR_KEYS`, D-54). `input_init` logs the per-section counts and warns about any action with no section, which is what catches a new action that forgot to be rebinding-able. |
+| 6.4 | Mode indicators: SAS on/off and its reference, auto-guidance armed, delta-v remaining on the armed node | in progress | The status line reads `stage 2/3  SAS prograde  RCS on  chute  legs`: the mode, its reference, and what has already been let go, all in words. Auto-guidance armed and the armed node's delta-v are 8.3's, and there is no node to arm until block 7. |
+| 6.5 | Heat readout: the hottest part as a bar against its limit, named when it passes 70 %, and a fragment count when the stack has split | done | 2026-11-01. The bar is off the screen below 2 % of the limit; past 70 % its value becomes `62% Main stage`, from `readout.heat_part` through `nisp_part_row(...)->name`, because which part is going is the part a player can still act on. The status line gains `N loose piece(s)` whenever `mission.debris_count` is non-zero (Part F5). |
+| 6.6 | Stability readout: the static margin as a signed number in metres, with the drag centre and CoM marked on the attitude indicator | done | 2026-11-01. `MARGIN` is the signed metres; the picture is a nose-to-tail strip under the left column -- a square for the mass, a mark pointing down for the drag centre, one pointing up for the thrust, each in its own colour -- drawn only while there is air. A strip rather than marks on the ship: the chase camera is behind and above it, where marks on the stack would sit under the reticle and behind the silhouette (D-37's teaching still happens, as a pair of marks crossing). |
+| | **Accept:** every number a flight needs is on screen, and every key that changes it is remappable | in progress | 2026-11-01, host + emulator: `nispcheck: ok (471 checks)`, `make emu-test` 12/12 ok, the flight bench still 221 triangles with the whole HUD on top of it, and two new screen references added to the manifest -- Controls `cda2f879`, Keys `c96e5467`. Owed: the badge run, which is the only frame rate that means anything for a HUD (D-39), and a look at the stability strip, which the bench never draws because the bench is above the air. |
 | **7** | **Map mode and manual nodes** | | |
 | 7.1 | `map/map_view.{c,h}`: TAB to map, the current SOI's plane, Bob and Cheese as discs, Cheese's orbit, the ship | todo | The ship keeps flying while the map is up. |
 | 7.2 | `map/orbit_draw.{c,h}`: the conic as a polyline sampled from the elements (128 samples), plus the predicted path through the patch chain | todo | |
@@ -1983,6 +1983,22 @@ document if it ever happens:
   manifest (`make emu-run` does not, because there the point of the card is
   that something is saved on it), and two runs in a row then produced all
   seven hashes identically.
+- **F-40** 2026-11-01: **the solar system went the wrong way round, and only
+  the length of a day noticed.** Bob's rotation carries the pad toward -z, and
+  the orbits were written sweeping the other way: `pz = +a sin u cos i` with
+  `vz = +a n cos u cos i`, which is a position sweeping -z toward +x and an
+  angular momentum of -y. Every number that does not care about handedness was
+  right with it -- radii, surface gravities, all three periods, the whole
+  delta-v budget -- and the bug survived four blocks of tests. What caught it
+  is day and night: a point on the surface was chasing its own sun, and Bob's
+  solar day came out 21,499 s against the 21,600 s a Kerbin player can quote
+  from memory. Flipping the `z` component of position and velocity together
+  gives 21,599.98 s, a sidereal day of 21,549.4 s, the pad's first noon at
+  10,799.1 s, and a point 90 degrees east of the pad at noon a quarter of a
+  day earlier. `nispcheck` case 15 is those numbers, and it is the only case
+  in the harness that could have seen this -- which says something about a
+  harness that measures only magnitudes.
+
 
 ### Decisions
 
@@ -2210,6 +2226,26 @@ document if it ever happens:
   and one that closes on ESC must not travel two levels up in the same frame.
   `main.c` samples the keys only when the menu was closed at the start of the
   frame, which is what makes a dialog closeable at all.
+- **D-53** **A launch happens in daylight, and the sky runs on the mission's
+  clock while it is flying.** The world clock starts at the pad's first local
+  noon (`nisp_local_noon`, `sim/ephemeris.c`), so the first thing a player sees
+  through a chase camera is a lit planet rather than a black one, and no one
+  has to wind a clock to test a launch. PgUp / PgDn move the epoch an hour, or
+  six with the boost key, from the title and the world view. Once a ship is
+  flying the sky is asked where the planets are at `mission.t`, not at the
+  show clock: a warp of 10,000 that left the sun where it was would be a sky
+  that disagrees with the position it is drawn against.
+
+- **D-54** **Every key is rebinding-able, and the list is grouped.** As in
+  SynthMiner, nothing about the controls is fixed; unlike SynthMiner the
+  bindings are too many for one screen, so Settings -> Controls is a list of
+  sections -- Flight, Map and warp, Engineering, Camera, System -- and each
+  section opens its own scrolling list of actions. A section is stored as
+  section + 1 in the action table, so an action that was never assigned reads
+  as unassigned rather than as "Flight", and `input_init` logs a warning for
+  it: the failure mode of an append-only action enum is a new action nobody
+  can rebind, and that is a bug a log line can catch at boot.
+
 
 ---
 
@@ -2269,5 +2305,5 @@ document if it ever happens:
   menu, and the Spaceport hub that the game hangs off.
 - `main/game/scene.c` -- the world as drawn: three lit spheres and a starfield,
   camera-relative metres, the LOD ladder.
-- `tools/nispcheck.c` -- the host harness, 14 cases, and the only thing standing
+- `tools/nispcheck.c` -- the host harness, 15 cases, and the only thing standing
   between this project and a plausible-looking wrong solar system.

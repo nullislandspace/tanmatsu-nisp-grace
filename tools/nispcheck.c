@@ -2235,6 +2235,142 @@ static void case14_blueprint(void) {
     pod_pods_count_as_control();
 }
 
+// --- Case 15: day and night (plan 6.1) ---------------------------------
+//
+// A launch that starts in the dark is a launch nobody can see, so the game
+// chooses its launch epoch from nisp_local_noon. That is one function whose
+// sign could be wrong in three different ways -- the hour angle, the sense
+// of the wrap, and the sense of the body's spin against the sense of its
+// orbit -- and every one of them still draws a plausible-looking sun.
+static void noon_at_the_pad(void) {
+    nisp_body_t const* b = nisp_body(BODY_BOB);
+
+    double pad[3];
+    nisp_surface_point(BODY_BOB, 0.0, NISP_PAD_LAT, NISP_PAD_LON, pad);
+
+    // Bob is at +x at t = 0 and the pad at 0N 0E is on the far side of it
+    // from Frodo: the launch epoch the game used to inherit is midnight.
+    CHECK_NEAR(nisp_sun_elevation(BODY_BOB, 0.0, pad), -1.0, 0.02, "the pad is underfoot at t = 0");
+    float const c0 = nisp_solar_time(BODY_BOB, 0.0, pad);
+    CHECK(c0 < 0.05f || c0 > 23.95f, "and its clock reads midnight (%.4f h)", (double)c0);
+
+    double const noon = nisp_local_noon(BODY_BOB, 0.0, NISP_PAD_LAT, NISP_PAD_LON);
+    CHECK(noon > 0.0 && noon < b->rotation_s, "the first noon is inside the first day (%.1f s)", noon);
+    // A Kerbin player can quote this one: the game starts at 00:00 with the
+    // KSC on the far side of the planet, and the sun is due south three
+    // hours later.
+    CHECK_NEAR(noon, 10800.0, 5.0, "first noon at the pad, s (Kerbin: 10,800)");
+
+    double p[3];
+    nisp_surface_point(BODY_BOB, noon, NISP_PAD_LAT, NISP_PAD_LON, p);
+    CHECK_NEAR(nisp_sun_elevation(BODY_BOB, noon, p), 1.0, 0.02, "the sun is overhead at that noon");
+    CHECK_NEAR(nisp_solar_time(BODY_BOB, noon, p), 12.0, 0.05, "and the clock there reads 12:00");
+
+    // The solar day, measured rather than assumed: Bob goes round Frodo the
+    // opposite way to the way it turns, so the two add instead of cancelling
+    // and the day is a little shorter than the sidereal one (F-40).
+    // Started half a day on, so the window can only hold the NEXT noon:
+    // started one second after a noon, the noon it just had is the highest
+    // point in the window and the measurement would read zero.
+    double const noon2 = nisp_local_noon(BODY_BOB, noon + 0.5 * b->rotation_s, NISP_PAD_LAT, NISP_PAD_LON);
+    double const solar_day = noon2 - noon;
+    printf("      solar day at the pad: %.1f s (%.4f h), sidereal %.1f s\n", solar_day, solar_day / 3600.0,
+           (double)b->rotation_s);
+    CHECK_NEAR(solar_day, 21600.0, 5.0, "Bob's solar day, s (Kerbin: 21,600)");
+
+    // Midnight is half a solar day on: the sun underfoot, the clock at 0.
+    double const midnight = noon + 0.5 * solar_day;
+    nisp_surface_point(BODY_BOB, midnight, NISP_PAD_LAT, NISP_PAD_LON, p);
+    CHECK_NEAR(nisp_sun_elevation(BODY_BOB, midnight, p), -1.0, 0.02, "half a day later it is underfoot");
+    float const cm = nisp_solar_time(BODY_BOB, midnight, p);
+    CHECK(cm < 0.05f || cm > 23.95f, "and the clock reads 00:00 (%.4f h)", (double)cm);
+
+    // The clock is a clock: it advances at 24 hours a solar day, and it
+    // never goes backwards.
+    float prev = nisp_solar_time(BODY_BOB, noon - 0.5 * solar_day, pad);
+    double drift = 0.0;
+    bool monotonic = true;
+    for (int i = 1; i <= 96; i++) {
+        double const t = noon - 0.5 * solar_day + solar_day * (double)i / 96.0;
+        nisp_surface_point(BODY_BOB, t, NISP_PAD_LAT, NISP_PAD_LON, p);
+        float const c = nisp_solar_time(BODY_BOB, t, p);
+        float d = c - prev;
+        if (d < -12.0f) d += 24.0f;  // the wrap at midnight, not a reversal
+        if (d < 0.0f) monotonic = false;
+        drift += d;
+        prev = c;
+    }
+    CHECK(monotonic, "the local clock never runs backwards");
+    CHECK_NEAR(drift, 24.0, 0.1, "and gains exactly 24 h over one solar day");
+
+    // The rate, against the measured day rather than against a formula.
+    nisp_surface_point(BODY_BOB, noon + 3600.0, NISP_PAD_LAT, NISP_PAD_LON, p);
+    float const after = nisp_solar_time(BODY_BOB, noon + 3600.0, p);
+    CHECK_NEAR(after, 12.0 + 3600.0 * 24.0 / solar_day, 0.02, "one hour of clock per 3,600 s");
+}
+
+static void noon_elsewhere(void) {
+    nisp_body_t const* b = nisp_body(BODY_BOB);
+
+    // 45N: the sun is overhead at the equator, so a noon there is lower than
+    // one at the pad by exactly the cosine of the latitude.
+    double const noon_eq = nisp_local_noon(BODY_BOB, 0.0, 0.0f, 0.0f);
+    double const noon_45 = nisp_local_noon(BODY_BOB, 0.0, 0.7853981634f, 0.0f);
+    double p[3];
+    nisp_surface_point(BODY_BOB, noon_45, 0.7853981634f, 0.0f, p);
+    CHECK_NEAR(nisp_sun_elevation(BODY_BOB, noon_45, p), 0.7071, 0.02, "a 45N noon is cos(45) high");
+    CHECK(fabs(noon_45 - noon_eq) < 0.02 * b->rotation_s, "and happens at the same moment as the pad's");
+
+    // Longitude is a quarter of a day, and east is EARLIER: longitude grows
+    // in the direction the ground turns, so a point 90 deg east has already
+    // passed under the sun by the time the pad does.
+    double const noon_east = nisp_local_noon(BODY_BOB, 0.0, 0.0f, 1.5707963268f);
+    double const noon_west = nisp_local_noon(BODY_BOB, 0.0, 0.0f, -1.5707963268f);
+    double const solar_day = nisp_local_noon(BODY_BOB, noon_eq + 0.5 * b->rotation_s, 0.0f, 0.0f) - noon_eq;
+    printf("      noon at 90E / 0 / 90W: %.1f / %.1f / %.1f s\n", noon_east, noon_eq, noon_west);
+    CHECK(noon_east < noon_eq, "90E is nooned before the pad");
+    CHECK(noon_west > noon_eq, "and 90W after it");
+    CHECK_NEAR(noon_eq - noon_east, 0.25 * solar_day, 0.02 * solar_day, "a quarter day earlier, east");
+    CHECK_NEAR(noon_west - noon_eq, 0.25 * solar_day, 0.02 * solar_day, "a quarter day later, west");
+
+    // Underground reads negative and nothing about it is a lie.
+    nisp_surface_point(BODY_BOB, noon_eq, 0.0f, 0.0f, p);
+    for (int i = 0; i < 3; i++) p[i] *= 0.5;
+    CHECK(nisp_sun_elevation(BODY_BOB, noon_eq, p) > 0.9f, "halfway to the core, still on the sun's side");
+    nisp_surface_point(BODY_BOB, noon_eq, 0.0f, 3.1415926536f, p);
+    CHECK(nisp_sun_elevation(BODY_BOB, noon_eq, p) < -0.9f, "and the antipode is in the dark");
+}
+
+static void bodies_without_a_day(void) {
+    // Frodo does not turn, so it has no local time to report -- 12:00
+    // everywhere, and nisp_local_noon hands the epoch straight back.
+    double const at[3] = {0.0, 0.0, 5000.0};
+    CHECK_NEAR(nisp_solar_time(BODY_FRODO, 1000.0, at), 12.0, 1e-6, "a body that does not turn reads noon");
+    CHECK_NEAR(nisp_local_noon(BODY_FRODO, 1234.5, 0.0f, 0.0f), 1234.5, 1e-9, "and has no noon to find");
+
+    // Cheese is tidally locked: one face always toward Bob, so its day is
+    // its month -- one sunrise every orbit.
+    nisp_body_t const* c = nisp_body(BODY_CHEESE);
+    double rel[3];
+    nisp_surface_point(BODY_CHEESE, 0.0, 0.0f, 0.0f, rel);
+    float const e_now = nisp_sun_elevation(BODY_CHEESE, 0.0, rel);
+    double const noon = nisp_local_noon(BODY_CHEESE, 0.0, 0.0f, 0.0f);
+    double p[3];
+    nisp_surface_point(BODY_CHEESE, noon, 0.0f, 0.0f, p);
+    printf("      Cheese noon: %.1f s (%.2f days), elevation %.3f -> %.3f\n", noon,
+           noon / (double)c->rotation_s, (double)e_now, (double)nisp_sun_elevation(BODY_CHEESE, noon, p));
+    CHECK(noon > 0.0 && noon <= 1.2 * c->rotation_s, "Cheese's noon is within a rotation");
+    CHECK(nisp_sun_elevation(BODY_CHEESE, noon, p) > e_now, "and the sun is higher there than it was");
+    CHECK(nisp_sun_elevation(BODY_CHEESE, noon, p) > 0.9f, "the sub-solar point is underfoot at noon");
+}
+
+static void case15_day_and_night(void) {
+    printf("case 15  day and night: the pad in daylight\n");
+    noon_at_the_pad();
+    noon_elsewhere();
+    bodies_without_a_day();
+}
+
 int main(void) {
     printf("nispcheck  --  Null Island Space Program, host harness\n\n");
 
@@ -2261,6 +2397,8 @@ int main(void) {
     case13_missions();
     printf("\n");
     case14_blueprint();
+    printf("\n");
+    case15_day_and_night();
     printf("\n");
 
     if (s_fail) {

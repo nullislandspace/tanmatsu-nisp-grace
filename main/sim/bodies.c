@@ -19,8 +19,10 @@
 //  the same shape as the render frame is what lets game/scene.c submit a
 //  position with one subtraction and no rotation (D-16).
 //
-//  Bob turns about -y, so the pad at 0N 0E moves toward +z: that direction
-//  is "east", and it is where a launch gets its 174.9 m/s for free.
+//  Bob turns about +y, so the pad at 0N 0E moves toward -z: that direction
+//  is "east", and it is where a launch gets its 174.9 m/s for free. Both
+//  orbits go the same way round, so a prograde launch is prograde about
+//  Frodo too, and Bob's solar day comes out at Kerbin's 21,600 s (F-40).
 // =====================================================================
 static nisp_body_t const BODY[BODY_COUNT] = {
     // Bob: the planet.

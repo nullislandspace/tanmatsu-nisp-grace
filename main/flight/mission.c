@@ -6,6 +6,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "rocket/heat.h"
@@ -130,7 +131,9 @@ void nisp_mission_launch(nisp_mission_t* m, nisp_design_t const* d, int body, do
 
     nisp_mission_init(m);
     nisp_vessel_pad(&m->ship, d, body, t);
-    m->t = t;
+    if (d != NULL) snprintf(m->vessel_name, sizeof(m->vessel_name), "%s", d->name);
+    m->t        = t;
+    m->t_launch = t;
     m->state = NISP_MISSION_FLYING;
     m->music_space = false;
 
@@ -147,7 +150,8 @@ void nisp_mission_begin(nisp_mission_t* m, nisp_vessel_t const* v, double t) {
     if (m == NULL || v == NULL) return;
     nisp_mission_init(m);
     nisp_vessel_copy(v, &m->ship);
-    m->t = t;
+    m->t        = t;
+    m->t_launch = t;
     m->state = NISP_MISSION_FLYING;
 
     nisp_readout_t r;
@@ -156,6 +160,13 @@ void nisp_mission_begin(nisp_mission_t* m, nisp_vessel_t const* v, double t) {
     m->max_speed_ms = r.speed_ms;
     m->max_heat = r.heat_max;
     m->music_space = r.alt_km >= NISP_MUSIC_SPACE_KM && !r.in_air;
+}
+
+// A command that will not be obeyed, said out loud (plan 6.5). The reason is
+// the useful half: "you pressed C and nothing happened" is a bug report,
+// "you pressed C at 900 m/s" is a lesson.
+static void refuse(nisp_mission_t* m, char const* why) {
+    snprintf(m->last_refusal, sizeof(m->last_refusal), "%s", why);
 }
 
 // The player's one-shot commands, consumed here so that a frame is never
@@ -177,8 +188,17 @@ static void apply_commands(nisp_mission_t* m, nisp_control_t* ctl, nisp_readout_
         // be useful and slow enough not to tear it.
         // ... and only below the speed a canopy survives opening at, which
         // is also the one speed at which its drag is integrable (F-29, F-30).
-        if (!v->stack.parachute && r->q_dyn_pa >= NISP_CHUTE_MIN_Q && r->v_rel_ms <= NISP_CHUTE_MAX_V_MS)
+        if (v->stack.parachute) {
+            // Already open: nothing to do, and nothing to explain.
+        } else if (!r->in_air) {
+            refuse(m, "Chute: there is no air here");
+        } else if (r->q_dyn_pa < NISP_CHUTE_MIN_Q) {
+            refuse(m, "Chute: the air is too thin to hold it");
+        } else if (r->v_rel_ms > NISP_CHUTE_MAX_V_MS) {
+            refuse(m, "Too fast for the chute");
+        } else {
             nisp_vessel_chute(v, true);
+        }
     }
 
     if (ctl->legs) {
@@ -257,6 +277,11 @@ void nisp_mission_step(nisp_mission_t* m, nisp_control_t* ctl, double frame_dt) 
     }
 
     double const dt_frame = clamp_dt(frame_dt);
+
+    // A refusal belongs to the frame it happened on: the key was pressed
+    // once, and the reason is on screen for that frame (mission.h).
+    m->last_refusal[0] = '\0';
+
     nisp_control_t const idle = {0};
     nisp_control_t const* c = ctl != NULL ? ctl : &idle;
 

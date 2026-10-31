@@ -53,10 +53,19 @@ typedef enum {
     // because ENTER is what every other screen on the badge already means.
     NISP_CONFIRM,
 
+    // Plan 6.3. FOCUS is Engineering's "cycle what the keyboard is editing";
+    // it used to be MAP, which meant TAB did two unrelated things and the
+    // map key could not become M (KSP's) without breaking the sheet.
+    NISP_FOCUS,
+    // The world clock (plan 6.1): a launch wants daylight, and a person
+    // testing a launch should not have to wait for it.
+    NISP_TIME_FASTER,
+    NISP_TIME_SLOWER,
+
     NISP_ACTION_COUNT
 } nisp_action_t;
 
-// The per-frame mask. 27 actions, so a uint32 with room to spare.
+// The per-frame mask. 30 actions, so a uint32 with room to spare.
 typedef uint32_t nisp_actions_t;
 
 static inline bool act_held(nisp_actions_t m, nisp_action_t a) {
@@ -101,3 +110,29 @@ void input_reset_defaults(void);
 // A keycap label for a scancode: "W", "Space", "Up", "F2". Written into
 // `buf`, which is also returned.
 char const* input_key_name(uint16_t sc, char* buf, int cap);
+
+// --- The sections the Controls menu is split into (plan 6.3) -------------
+//
+// Presentation only. A binding is still one global table keyed by action,
+// because a key belongs to the game rather than to a screen: W steers on
+// the pad, on the launch mount and in a hover, and nobody wants to bind it
+// three times. The sections only decide how many screens Settings needs to
+// show thirty keys without scrolling one long list.
+typedef enum {
+    NISP_SECTION_FLIGHT = 0,   // steer, throttle, stage, the rest of a launch
+    NISP_SECTION_MAP,          // map mode, warp, the world clock
+    NISP_SECTION_ENGINEERING,  // the blueprint sheet
+    NISP_SECTION_VIEW,         // where the camera looks
+    NISP_SECTION_SYSTEM,       // pause, save, diagnostics
+    NISP_SECTION_COUNT
+} nisp_section_t;
+
+// Which section an action belongs to, and a section's size.
+int input_action_section(nisp_action_t a);
+char const* input_section_label(int section);
+int input_section_row_count(int section);
+
+// The `row`th action of `section`, in menu order. -1 past the end, so a
+// caller loops on `row < input_section_row_count(section)` and never reads
+// off the end of either table.
+int input_section_action(int section, int row);

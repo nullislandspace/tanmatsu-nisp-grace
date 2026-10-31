@@ -31,6 +31,8 @@ RUN shots scene=engineering ms=0,1500
 RUN shots scene=spaceport ms=0
 RUN shots scene=designs ms=0
 RUN shots scene=settings ms=0
+RUN shots scene=controls ms=0
+RUN shots scene=keys ms=0
 RUN shots scene=graphics ms=0
 RUN shots scene=audio ms=0
 RUN shots scene=display ms=0

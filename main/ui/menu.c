@@ -35,7 +35,8 @@ typedef enum {
     SCR_NAME,      // typing a name
     SCR_DELETE,    // are you sure
     SCR_SETTINGS,  // Controls / Graphics / Audio / Display
-    SCR_CONTROLS,
+    SCR_CONTROLS,  // which kind of key to rebind (plan 6.3)
+    SCR_KEYS,      // that kind's keys, one row each
     SCR_GRAPHICS,
     SCR_AUDIO,
     SCR_DISPLAY,
@@ -72,7 +73,8 @@ static screen_t parent_of(screen_t s) {
         case SCR_NAME: return s_edit_return;
         case SCR_DELETE: return SCR_WORLD;
         case SCR_SETTINGS: return s_settings_back;
-        case SCR_CONTROLS:
+        case SCR_CONTROLS: return SCR_SETTINGS;
+        case SCR_KEYS: return SCR_CONTROLS;
         case SCR_GRAPHICS:
         case SCR_AUDIO:
         case SCR_DISPLAY: return SCR_SETTINGS;
@@ -120,6 +122,8 @@ static char s_slot_label[NISP_SAVE_SLOTS][64];
 static char s_title[64];
 static char s_subtitle[64];
 static char s_key_name[NISP_ACTION_COUNT][12];
+static char s_section_count[NISP_SECTION_COUNT][12];
+static int s_section;  // which section SCR_KEYS is showing
 
 // --- News -----------------------------------------------------------------
 
@@ -330,22 +334,46 @@ static int build_settings(void) {
     return 6;
 }
 
+// Thirty bindings on one screen is a wall. They are grouped by what they
+// are for (game/input.h), which is also the order a player goes looking
+// for them in: "the key that stages the rocket", "the key that turns the
+// camera". The bindings themselves stay one global table -- W is W
+// everywhere -- so a section is a page of the menu, not a second set of
+// keys.
 static int build_controls(void) {
-    begin("Controls", NULL, "enter rebinds   esc back");
-    // Sixteen rows will not fit at the usual pitch, so this screen is
-    // taller, tighter, and scrolls (se_ui.h: visible_rows).
+    begin("Controls", "Every key the game answers to, grouped by what it is for",
+          "up/down choose   enter opens   esc back");
+    for (int i = 0; i < NISP_SECTION_COUNT; i++) {
+        snprintf(s_section_count[i], sizeof(s_section_count[i]), "%d keys", input_section_row_count(i));
+        s_rows[i] = (se_menu_row_t){.label = input_section_label(i), .kind = SE_MENU_VAL_TEXT,
+                                    .value = s_section_count[i]};
+    }
+    s_rows[NISP_SECTION_COUNT] = (se_menu_row_t){.label = "Reset to defaults", .kind = SE_MENU_VAL_NONE};
+    s_rows[NISP_SECTION_COUNT + 1] = (se_menu_row_t){.label = "Back", .kind = SE_MENU_VAL_NONE};
+    return NISP_SECTION_COUNT + 2;
+}
+
+// The same layout the old single Controls screen used: taller, tighter, and
+// scrolling, because Flight is fifteen rows and the badge is 480 px tall.
+static int build_keys(void) {
+    begin(input_section_label(s_section), "enter rebinds a row   esc back",
+          "up/down choose   enter picks a new key   esc back");
     s_def.panel_h = 0.95f;
     s_def.row_h = 38.0f;
     s_def.panel_w = 0.86f;
     s_def.value_dx = 300.0f;
     s_def.visible_rows = 8;
-    for (int a = 0; a < NISP_ACTION_COUNT; a++) {
+
+    int const rows = input_section_row_count(s_section);
+    for (int r = 0; r < rows; r++) {
+        int const a = input_section_action(s_section, r);
+        if (a < 0) break;
         input_key_name(input_key((nisp_action_t)a), s_key_name[a], (int)sizeof(s_key_name[a]));
-        s_rows[a] = (se_menu_row_t){.label = input_action_label((nisp_action_t)a), .kind = SE_MENU_VAL_TEXT,
+        s_rows[r] = (se_menu_row_t){.label = input_action_label((nisp_action_t)a), .kind = SE_MENU_VAL_TEXT,
                                     .value = s_key_name[a]};
     }
-    s_rows[NISP_ACTION_COUNT] = (se_menu_row_t){.label = "Reset to defaults", .kind = SE_MENU_VAL_NONE};
-    return NISP_ACTION_COUNT + 1;
+    s_rows[rows] = (se_menu_row_t){.label = "Back", .kind = SE_MENU_VAL_NONE};
+    return rows + 1;
 }
 
 static int build_graphics(void) {
@@ -446,6 +474,7 @@ static int build_rows(screen_t s) {
         case SCR_DELETE: return build_delete();
         case SCR_SETTINGS: return build_settings();
         case SCR_CONTROLS: return build_controls();
+        case SCR_KEYS: return build_keys();
         case SCR_GRAPHICS: return build_graphics();
         case SCR_AUDIO: return build_audio();
         case SCR_DISPLAY: return build_display();
@@ -817,20 +846,36 @@ static void activate(menu_cmd_t* cmd) {
             break;
 
         case SCR_CONTROLS:
-            if (row < NISP_ACTION_COUNT) {
-                nisp_action_t const action = (nisp_action_t)row;
-                // Blocks: the engine pumps frames until a key is pressed,
-                // and takes F1 and the volume keys along the way (se_ui.h).
-                uint16_t const sc = se_ui_capture_key(input_action_label(action));
-                if (sc != 0) {
-                    input_bind(action, sc);
-                    menu_status_set("Bound");
-                }
-            } else if (row == NISP_ACTION_COUNT) {
+            if (row < NISP_SECTION_COUNT) {
+                s_section = row;
+                s_cursor[SCR_KEYS] = 0;
+                go(SCR_KEYS);
+            } else if (row == NISP_SECTION_COUNT) {
                 input_reset_defaults();
                 menu_status_set("Back to the shipped keys");
+            } else {
+                go_back(cmd);
             }
             break;
+
+        case SCR_KEYS: {
+            int const rows = input_section_row_count(s_section);
+            if (row < rows) {
+                int const action = input_section_action(s_section, row);
+                if (action >= 0) {
+                    // Blocks: the engine pumps frames until a key is pressed,
+                    // and takes F1 and the volume keys along the way (se_ui.h).
+                    uint16_t const sc = se_ui_capture_key(input_action_label((nisp_action_t)action));
+                    if (sc != 0) {
+                        input_bind((nisp_action_t)action, sc);
+                        menu_status_set("Bound");
+                    }
+                }
+            } else {
+                go_back(cmd);
+            }
+            break;
+        }
 
         case SCR_GRAPHICS:
             if (row < NISP_VIEW_COUNT) {
@@ -1104,6 +1149,11 @@ bool menu_show(char const* name) {
     } else if (!strcmp(name, "controls")) {
         s_settings_back = SCR_TITLE;
         go(SCR_CONTROLS);
+    } else if (!strcmp(name, "keys")) {
+        s_settings_back = SCR_TITLE;
+        s_section = 0;
+        s_cursor[SCR_KEYS] = 0;
+        go(SCR_KEYS);
     } else if (!strcmp(name, "graphics")) {
         s_settings_back = SCR_TITLE;
         go(SCR_GRAPHICS);

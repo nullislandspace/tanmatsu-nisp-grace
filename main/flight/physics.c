@@ -746,12 +746,16 @@ void nisp_vessel_readout(nisp_vessel_t const* v, double t, nisp_readout_t* out) 
     out->periapsis_km = 0.0f;
     out->period_s = 0.0f;
     out->incl_deg = 0.0f;
+    out->time_to_ap_s = -1.0f;
+    out->time_to_pe_s = -1.0f;
     if (nisp_state_to_elements(&st, v->body, t, &el)) {
         out->escaped = el.e >= 1.0;
         out->periapsis_km = (float)(el.periapsis_km - b->radius_km);
         out->apoapsis_km = el.e < 1.0 ? (float)(el.apoapsis_km - b->radius_km) : 0.0f;
         out->period_s = (float)el.period_s;
         out->incl_deg = (float)(el.inc * NISP_RAD2DEG);
+        out->time_to_ap_s = (float)nisp_time_to_apsis(&el, t, true);
+        out->time_to_pe_s = (float)nisp_time_to_apsis(&el, t, false);
     }
 
     double up[3], north[3], east[3];

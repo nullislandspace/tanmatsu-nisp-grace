@@ -34,6 +34,7 @@
 #include "flight/control.h"
 #include "flight/physics.h"
 #include "flight/warp.h"
+#include "rocket/design.h"
 
 #define NISP_DEBRIS_MAX 8
 
@@ -54,8 +55,14 @@ typedef struct {
     nisp_vessel_t debris[NISP_DEBRIS_MAX];
     int debris_count;
 
-    double t;  // the sim clock, seconds
-    int state;
+    double t;         // the sim clock, seconds
+    double t_launch;  // the sim clock this flight started on: T+ is t - t_launch
+    int    state;
+
+    // What the player called the rocket (plan 6.1). Copied from the design at
+    // launch, because a fragment of a broken rocket is still the same ship,
+    // and the HUD names the ship rather than the save slot.
+    char vessel_name[NISP_DESIGN_NAME_MAX + 1];
 
     // What the save slot remembers afterwards (9.3): the numbers a flight
     // is judged by, and the only "score" the game has.
@@ -76,11 +83,19 @@ typedef struct {
 
     // What the last frame cost, for the profiler and the HUD.
     nisp_warp_step_t last_warp;
+
+    // A command that was refused, in the mission's own words, and only for
+    // the frame it was refused on (plan 6.5). The player pressed something;
+    // the answer is the reason, not silence.
+    char last_refusal[96];
 } nisp_mission_t;
 
 void nisp_mission_init(nisp_mission_t* m);
 
-// On the pad, engines off, holding the throttle the player sets.
+// On the pad, engines off, holding the throttle the player sets. `t` is the
+// absolute sim clock the launch happens at -- the pad is on a turning planet
+// in a solar system that is somewhere, and a launch in daylight is chosen
+// with nisp_local_noon (sim/ephemeris.h, plan 6.1) rather than assumed.
 void nisp_mission_launch(nisp_mission_t* m, nisp_design_t const* d, int body, double t);
 
 // Adopt a vessel that is already somewhere: the resume path (9.3) restores a
