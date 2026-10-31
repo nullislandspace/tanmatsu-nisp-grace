@@ -6,10 +6,16 @@
 //
 //    title bar     a strip along the bottom: Play / Settings / Quit
 //      Play        the save slots, then
-//        a world   Play / Rename / Delete
+//        a world   its Spaceport: Continue mission / Build a rocket /
+//                  Launch... / Designs... / Rename / Delete
 //        empty     New world: name, seed, Random seed, Create
 //      Settings    Controls / Graphics / Audio / Display / Livestream
 //    pause         Resume / Save / Settings / Save and quit / Quit
+//
+//  THE HUB LISTS VERBS, NEVER VERBS WITH ARGUMENTS (D-24). A row that needs
+//  a parameter opens a picker for it -- Launch... asks which design, Designs...
+//  asks which one -- so the hub is the same fixed-length menu however many
+//  blueprints the player has (Part N1).
 //
 //  Every screen but the title bar is drawn with the engine's list menu
 //  (se_ui.h) over whatever is behind it -- the title's drift, or the
@@ -46,19 +52,29 @@
 
 typedef enum {
     MENU_CMD_NONE = 0,
-    MENU_CMD_PLAY,      // open the world in `slot`
+    MENU_CMD_PLAY,      // open the world in `slot`: its Spaceport hub opens, the mission does not
+    MENU_CMD_CLOSE_WORLD, // the open world was deleted: main.c drops it (plan 1.2)
     MENU_CMD_CREATE,    // make a world in `slot` from `name` and `seed`, then play it
     MENU_CMD_RESUME,    // close the pause menu, keep flying
     MENU_CMD_SAVE,      // save the open world, stay paused
     MENU_CMD_SAVE_QUIT, // save the open world and go back to the title
     MENU_CMD_LEAVE,     // back to the launcher
     MENU_CMD_STREAM,    // toggle the livestream (main.c owns the framebuffer)
+
+    // Engineering (Part B, plan 4.6-4.7). The hub lists verbs and the
+    // pickers fill in the arguments (D-24), so these are the verbs.
+    MENU_CMD_BUILD,       // Engineering, on a fresh unnamed working design
+    MENU_CMD_ENGINEERING, // Engineering, on the saved design in `name`
+    MENU_CMD_LAUNCH,      // fly the saved design in `name`
+    MENU_CMD_NAME,        // the design name the text entry accepted
 } menu_cmd_kind_t;
 
 typedef struct {
     menu_cmd_kind_t kind;
     int             slot;
-    char            name[NISP_NAME_MAX];
+    // Wide enough for both names a command carries: a world's (NISP_NAME_MAX)
+    // and a design's (NISP_DESIGN_NAME_MAX), which is one character longer.
+    char            name[32];
     uint32_t        seed;
 } menu_cmd_t;
 
@@ -83,6 +99,14 @@ menu_cmd_t menu_update(void);
 
 // Draw the menu over `fb`, at full resolution, after everything else.
 void menu_draw(pax_buf_t* fb);
+
+// The Spaceport hub for `slot`, from main.c: opening a world opens its hub
+// rather than launching whatever was last flown (plan 4.7).
+void menu_open_spaceport(int slot);
+
+// The text entry for the blueprint Engineering is holding. It closes itself:
+// MENU_CMD_NAME carries the accepted name, and no menu is left open.
+void menu_open_working_name(char const* initial);
 
 // Open one screen by name ("worlds", "controls", "pause", ...) for a
 // `shots` test: the screens are drawn from state, so a shot of each is a

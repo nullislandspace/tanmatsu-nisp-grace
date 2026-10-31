@@ -19,13 +19,13 @@
 #include <stdint.h>
 
 typedef enum {
-    NISP_FORWARD = 0,
-    NISP_BACK,
-    NISP_LEFT,
-    NISP_RIGHT,
-    NISP_UP,
-    NISP_DOWN,
-    NISP_BOOST,
+    NISP_FORWARD = 0,  // pitch down: the nose follows the key
+    NISP_BACK,         // pitch up
+    NISP_LEFT,         // yaw left
+    NISP_RIGHT,        // yaw right
+    NISP_UP,           // throttle up
+    NISP_DOWN,         // throttle down
+    NISP_BOOST,        // the big step: fast throttle, big warp jumps
     NISP_LOOK_UP,
     NISP_LOOK_DOWN,
     NISP_LOOK_LEFT,
@@ -34,10 +34,29 @@ typedef enum {
     NISP_SAVE,
     NISP_INFO,
     NISP_SCREENSHOT,
+
+    // Flight controls, appended 2026-11-01 (Part F2, plan 6.3). These are
+    // the ones a rocket needs that a spaceship-with-a-joystick did not.
+    NISP_ROLL_LEFT,
+    NISP_ROLL_RIGHT,
+    NISP_STAGE,     // drop the lowest live stage
+    NISP_CUT,       // engines off, nothing discarded
+    NISP_CHUTE,     // the capsule's parachute
+    NISP_LEGS,      // the live stage's leg set
+    NISP_SAS,       // cycle the stability-assist reference
+    NISP_RCS,       // the RCS switch: off means no control torque at all
+    NISP_WARP_UP,
+    NISP_WARP_DOWN,
+    NISP_MAP,       // TAB: flight view <-> map (plan 7.1)
+
+    // Engineering's key (plan 4.1): the sheet's "activate this". ENTER,
+    // because ENTER is what every other screen on the badge already means.
+    NISP_CONFIRM,
+
     NISP_ACTION_COUNT
 } nisp_action_t;
 
-// The per-frame mask. 15 actions, so a uint32 with room to spare.
+// The per-frame mask. 27 actions, so a uint32 with room to spare.
 typedef uint32_t nisp_actions_t;
 
 static inline bool act_held(nisp_actions_t m, nisp_action_t a) {

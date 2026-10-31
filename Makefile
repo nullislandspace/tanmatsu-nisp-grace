@@ -17,17 +17,21 @@ APP_INSTALL_BASE_PATH ?= /sd/apps/
 APP_INSTALL_PATH = $(APP_INSTALL_BASE_PATH)$(APP_SLUG_NAME)
 
 # The shipped music (music/). Everything in that directory goes onto the
-# card under the app's own music directory, EXCEPT the tracks named in
-# MUSIC_MENU_STEMS, which go into music/menu/ instead: se_mp3 plays every
-# .mp3 in the directory it is given and has no way to be pointed at one
-# file, so a track that belongs to one place lives in a directory of its
-# own (main/audio/music.h). The .txt beside each track is its license and
+# card, EXCEPT the tracks named in the *_STEMS lists, which go into the
+# directory of the context that plays them: se_mp3 plays every .mp3 in the
+# directory it is given and has no way to be pointed at one file, so a
+# track that belongs to one place lives in a directory of its own
+# (main/audio/music.h). The .txt beside each track is its license and
 # travels with it. metadata.json lists the same files by hand -- add a
 # track to both, or the app repository install comes up without it.
 MUSIC_ALL := $(notdir $(wildcard music/*))
-MUSIC_MENU_STEMS := brittle_rille
+MUSIC_MENU_STEMS        := brittle_rille
+MUSIC_ENGINEERING_STEMS := sneaky_adventure
+MUSIC_SPACE_STEMS       := impact_lento
 MUSIC_MENU := $(foreach f,$(MUSIC_ALL),$(if $(filter $(MUSIC_MENU_STEMS),$(basename $(f))),$(f)))
-MUSIC_POOL := $(filter-out $(MUSIC_MENU),$(MUSIC_ALL))
+MUSIC_ENGINEERING := $(foreach f,$(MUSIC_ALL),$(if $(filter $(MUSIC_ENGINEERING_STEMS),$(basename $(f))),$(f)))
+MUSIC_SPACE := $(foreach f,$(MUSIC_ALL),$(if $(filter $(MUSIC_SPACE_STEMS),$(basename $(f))),$(f)))
+MUSIC_POOL := $(filter-out $(MUSIC_MENU) $(MUSIC_ENGINEERING) $(MUSIC_SPACE),$(MUSIC_ALL))
 
 # ESP-IDF tools path (needed for the RISC-V cross-compiler)
 IDF_PATH ?= $(shell cat .IDF_PATH 2>/dev/null || echo `pwd`/esp-idf)
@@ -82,7 +86,7 @@ HOSTCFLAGS  := -O1 -Wall -Wextra -Werror=implicit-function-declaration \
 
 # The pure set: everything Part H compiles against, and nothing else.
 PURE_SRCS := $(wildcard main/sim/*.c) $(wildcard main/rocket/*.c) $(wildcard main/flight/*.c) \
-             main/common/rng.c
+             main/common/rng.c main/common/quat.c
 
 .PHONY: check
 check: hostpurity nispcheck
@@ -198,11 +202,19 @@ install: build
 	# from the app repository brings it along too.
 	$(call UPLOAD,nullislandlogo_ball.png,$(APP_INSTALL_PATH)/nullislandlogo_ball.png)
 	$(call UPLOAD,$(BUILD)/app.so,$(APP_INSTALL_PATH)/app.so)
-	@echo "Music: $(words $(MUSIC_ALL)) file(s) -- $(words $(MUSIC_MENU)) in music/menu, $(words $(MUSIC_POOL)) in music"
+	@echo "Music: $(words $(MUSIC_ALL)) file(s) -- $(words $(MUSIC_MENU)) in music/menu, $(words $(MUSIC_ENGINEERING)) in music/engineering, $(words $(MUSIC_SPACE)) in music/space, $(words $(MUSIC_POOL)) in music"
 	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH)/music >/dev/null 2>&1 || true
 	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH)/music/menu >/dev/null 2>&1 || true
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH)/music/engineering >/dev/null 2>&1 || true
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH)/music/space >/dev/null 2>&1 || true
 	@for m in $(MUSIC_MENU); do \
 	  ( cd badgelink/tools && ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/music/menu/$$m ../../music/$$m >/dev/null ) || exit 1; \
+	done
+	@for m in $(MUSIC_ENGINEERING); do \
+	  ( cd badgelink/tools && ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/music/engineering/$$m ../../music/$$m >/dev/null ) || exit 1; \
+	done
+	@for m in $(MUSIC_SPACE); do \
+	  ( cd badgelink/tools && ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/music/space/$$m ../../music/$$m >/dev/null ) || exit 1; \
 	done
 	@for m in $(MUSIC_POOL); do \
 	  ( cd badgelink/tools && ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/music/$$m ../../music/$$m >/dev/null ) || exit 1; \
@@ -346,7 +358,7 @@ APP_REPO_PATH ?= ../tanmatsu-app-repository/$(APP_SLUG_NAME)
 .PHONY: apprepo
 apprepo: build
 	@echo "=== Updating app repository ==="
-	mkdir -p $(APP_REPO_PATH)/music/menu
+	mkdir -p $(APP_REPO_PATH)/music/menu $(APP_REPO_PATH)/music/engineering $(APP_REPO_PATH)/music/space
 	cp metadata/metadata.json $(APP_REPO_PATH)/metadata.json
 	cp metadata/icon16.png $(APP_REPO_PATH)/icon16.png
 	cp metadata/icon32.png $(APP_REPO_PATH)/icon32.png
@@ -357,6 +369,8 @@ apprepo: build
 	# artwork and no music.
 	cp nullislandlogo_ball.png $(APP_REPO_PATH)/nullislandlogo_ball.png
 	@for m in $(MUSIC_MENU); do cp music/$$m $(APP_REPO_PATH)/music/menu/$$m || exit 1; done
+	@for m in $(MUSIC_ENGINEERING); do cp music/$$m $(APP_REPO_PATH)/music/engineering/$$m || exit 1; done
+	@for m in $(MUSIC_SPACE); do cp music/$$m $(APP_REPO_PATH)/music/space/$$m || exit 1; done
 	@for m in $(MUSIC_POOL); do cp music/$$m $(APP_REPO_PATH)/music/$$m || exit 1; done
 	@echo "  $(words $(MUSIC_ALL)) music file(s) copied"
 	@echo "=== App repository updated at $(APP_REPO_PATH) ==="

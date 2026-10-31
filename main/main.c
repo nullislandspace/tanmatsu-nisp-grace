@@ -5,11 +5,15 @@
 //  input pump, the device-global keys, the page flip. What lives here is
 //  the state machine and the ship:
 //
-//    title    the island drifting past, the wordmark over it, and the
-//             title bar's Play / Settings / Quit over that (the livestream
-//             is a setting, not a title bar item -- ui/menu.c)
-//    play     the ship and the HUD
-//    paused   the ship frozen under the pause menu
+//    title    the solar system drifting past, the wordmark over it, and
+//             the title bar's Play / Settings / Quit over that (the
+//             livestream is a setting, not a title bar item -- ui/menu.c)
+//    play     the mission, the chase camera on the ship, and the HUD
+//    paused   the mission frozen under the pause menu
+//    world    a save is open and nothing is flying: the Spaceport hub
+//             (ui/menu.c) over the drifting island
+//    engineering  the blueprint sheet (engineering/builder.c), the one
+//             screen in the game that is not the 3D scene at all
 //
 //  THE MENU DECIDES, THIS FILE ACTS (ui/menu.h). Opening a world,
 //  starting the stream, leaving to the launcher, resuming after a pause:
@@ -20,13 +24,17 @@
 //  THE CLOCK IS THE TEST KIT'S (testkit/showtime.h). Everything drawn
 //  reads showtime_now() rather than an accumulated dt, so a `shots` run
 //  can render one chosen instant and get the same pixels every time. A
-//  flight steered by a stick cannot be that, so a test flies a SCRIPTED
-//  path over the island instead (bench_pose) -- which makes the same
-//  test a regression test of the renderer, the HUD and the menus.
+//  flight steered by a stick cannot be that, so the bench content is not
+//  a flight at all: it is an orbit propagated analytically from a fixed
+//  set of orbital elements (bench_orbit), which is a pure function of the
+//  clock and still exercises the physics readout, the renderer, the HUD
+//  and the menus. A real mission steps on the show clock too -- its frame
+//  dt is the difference between two showtime_now() calls, not the engine's
+//  dt -- so that the mission and the picture advance together.
 //
-//  NO CHUNK STREAMING. The island is one small fixed mesh, submitted in
-//  full every frame (game/scene.h); there is nothing to page in, and no
-//  loader thread.
+//  NO CHUNK STREAMING, and no memory reserved for it at boot. The world
+//  is three spheres and a starfield, submitted in full every frame
+//  (game/scene.h); there is nothing to page in and no loader thread.
 // =====================================================================
 
 #include <math.h>
@@ -51,10 +59,21 @@
 
 #include "audio/music.h"
 #include "common/build_id.h"
+#include "common/quat.h"
+#include "engineering/builder.h"
+#include "flight/control.h"
+#include "flight/mission.h"
+#include "flight/physics.h"
+#include "flight/warp.h"
 #include "game/hud.h"
 #include "game/input.h"
 #include "game/scene.h"
+#include "rocket/design.h"
 #include "save/save.h"
+#include "sim/bodies.h"
+#include "sim/kepler.h"
+#include "sim/surface.h"
+#include "sim/units.h"
 #include "testkit/devtest.h"
 #include "testkit/profile.h"
 #include "testkit/screenshot.h"
@@ -80,9 +99,11 @@ static char const TAG[] = "nisp";
 // --- The state ----------------------------------------------------------
 
 typedef enum {
-    MODE_TITLE = 0,  // the island drifts; the title bar sits over it
-    MODE_PLAY,       // the ship has the keyboard
-    MODE_PAUSED      // the ship is frozen; the pause menu has it
+    MODE_TITLE = 0,    // the island drifts; the title bar sits over it
+    MODE_PLAY,         // the ship has the keyboard
+    MODE_PAUSED,       // the ship is frozen; the pause menu has it
+    MODE_WORLD,        // a save is open, nothing is flying: the Spaceport hub
+    MODE_ENGINEERING   // the blueprint sheet has the keyboard
 } mode_t;
 
 static mode_t s_mode = MODE_TITLE;
@@ -92,10 +113,44 @@ static mode_t s_mode = MODE_TITLE;
 static nisp_game_t s_game;
 static int s_slot = -1;
 
-// This frame's camera: title_pose() on the title, the ship in flight, and
-// wherever the ship stopped while paused.
-static nisp_pose_t s_pose;
-static float s_vel[3];
+// This frame's camera: nisp_camera_title() on the title, the chase camera
+// on the ship, and wherever the chase camera stopped while paused. The
+// look keys are offsets on top of whichever of those it is, so releasing
+// them and pressing them again never moves the world.
+static nisp_camera_t s_cam;
+static float s_look_yaw, s_look_pitch;  // radians
+
+// The flight. One mission, one control struct, one readout: flight/ owns
+// the ship and decides what it does, this file only decides what to ask
+// for and how often to ask. `s_flying` says a mission exists at all, which
+// is the difference between the HUD reporting a flight and reporting a
+// name over a frozen view.
+static nisp_mission_t s_mission;
+static nisp_control_t s_ctl;
+static nisp_readout_t s_readout;
+static nisp_design_t s_design;
+static bool s_flying;
+
+// The drawing Engineering is holding (engineering/builder.h). It is the
+// working design, not a saved one: it reaches the card only through Save
+// (plan 4.6), and it is what a launch from Engineering flies.
+static nisp_builder_t s_builder;
+
+// The bench orbit (see the bench section): the elements it is defined by,
+// so its state at any show time is one propagation away.
+static nisp_elements_t s_bench_el;
+
+// 100 km up, and a quarter of the way round from the pad: high enough to
+// be vacuum and to show the curvature, low enough that Bob fills the
+// frame, and off the pad so the pad is in shot as well.
+#define BENCH_ALT_KM 100.0f
+#define BENCH_NU0    (NISP_TWO_PI * 0.25)
+#define BENCH_SECS   20.0f  // what a perf test runs for, unasked
+
+// The show clock at the last frame. The mission's frame dt is the
+// difference between two showtime_now() calls rather than the engine's dt,
+// so the sim and the picture advance by exactly the same amount.
+static double s_show_last;
 
 static float s_fps;         // what the HUD reports, updated each second
 static bool s_info;         // the INFO key's diagnostic block
@@ -141,32 +196,233 @@ static void apply_audio(void) {
     audio_mixer_set_group_volume(0, settings_effects_volume());
 }
 
+// --- The ship: how big it is, how it is steered -------------------------
+
+// The rocket's length along its own axis, metres. The stack stores parts at
+// a distance from the nose, so the longest part is the tail.
+static float ship_length_m(nisp_vessel_t const* v) {
+    float x = 1.0f;
+    if (v == NULL) return x;
+    for (int i = 0; i < v->stack.count; i++) {
+        if (v->stack.part[i].x1 > x) x = v->stack.part[i].x1;
+    }
+    return x;
+}
+
+// Chase standoff, from the rocket's own length. A 6 m pod wants a camera 20
+// m back; a 40 m launcher wants one that can see all of it. A fixed number
+// would be either inside the rocket or leave it a speck, and the whole
+// point of the chase camera is to read the vehicle you are flying.
+static float ship_back_m(nisp_vessel_t const* v) {
+    return 2.5f * ship_length_m(v) + 15.0f;
+}
+static float ship_up_m(nisp_vessel_t const* v) {
+    return 0.6f * ship_length_m(v) + 5.0f;
+}
+
+// The bench: an orbit, not a flight. The test kit sets the clock rather
+// than running it (testkit/devtest.h), and a mission stepped frame by
+// frame is a function of where the frames happened to fall. An analytic
+// propagation from a fixed set of elements is a function of the clock
+// alone, so `shots scene=space` means the same thing here that it means
+// for a title screen. `t` is the bench's own time, seconds.
+static void bench_orbit(double t) {
+    nisp_design_demo(&s_design);
+    nisp_elements_circular(BODY_BOB, nisp_body(BODY_BOB)->radius_km + BENCH_ALT_KM, BENCH_NU0, 0.0,
+                           &s_bench_el);
+
+    nisp_state_t st;
+    nisp_elements_to_state(&s_bench_el, t, &st);
+
+    // A nose along the velocity: the attitude a coasting ship keeps, and
+    // the one a HUD is easiest to read against a circular orbit.
+    float pro[3] = {(float)st.v[0], (float)st.v[1], (float)st.v[2]};
+    nisp_vessel_orbit(&s_mission.ship, &s_design, BODY_BOB, &st, t, pro);
+
+    nisp_mission_begin(&s_mission, &s_mission.ship, t);
+    nisp_control_init(&s_ctl);
+    s_ctl.sas = NISP_SAS_HOLD;
+    s_ctl.rcs = true;
+}
+
+// The bench's frame: propagate, aim the nose along the orbit, read it. No
+// mission step -- the propagation IS the step, and it is exact.
+static void bench_frame(double t) {
+    nisp_state_t st;
+    nisp_elements_to_state(&s_bench_el, t, &st);
+    for (int i = 0; i < 3; i++) {
+        s_mission.ship.pos_km[i] = st.r[i];
+        s_mission.ship.vel_kms[i] = st.v[i];
+    }
+    s_mission.ship.omega[0] = s_mission.ship.omega[1] = s_mission.ship.omega[2] = 0.0f;
+
+    float pro[3];
+    nisp_vessel_prograde(&s_mission.ship, pro);
+    nisp_quat_from_dir(pro, &s_mission.ship.q);
+
+    s_mission.t = t;
+    nisp_vessel_readout(&s_mission.ship, t, &s_readout);
+    s_mission.music_space = s_readout.alt_km >= NISP_MUSIC_SPACE_KM;
+}
+
+// The manual keys, in the pilot's terms rather than the ship's. W and S
+// raise and lower the nose, A and D swing it left and right, Q and E roll
+// it -- and the ship's own axes have no reason to line up with the horizon,
+// because the attitude a rocket inherits from its orbit is whatever the
+// last coast left it with. So the wanted rotation is built in the frame at
+// the ship and turned into vehicle axes, which is the only place the
+// control system reads torque from.
+//
+// In the frame at the ship: a rotation about minus the screen-right axis
+// raises the nose, a rotation about the local vertical swings it right, and
+// a rotation about minus the nose rolls it right on screen.
+static void manual_torque(nisp_actions_t const mask, float out[3]) {
+    out[0] = out[1] = out[2] = 0.0f;
+    if (mask == 0u) return;
+
+    float nose[3];
+    nisp_vessel_nose(&s_mission.ship, nose);
+
+    double up_d[3], north[3], east[3];
+    nisp_local_frame(s_mission.ship.body, s_mission.ship.pos_km, up_d, north, east);
+    float up[3] = {(float)up_d[0], (float)up_d[1], (float)up_d[2]};
+
+    float right[3] = {up[1] * nose[2] - up[2] * nose[1], up[2] * nose[0] - up[0] * nose[2],
+                      up[0] * nose[1] - up[1] * nose[0]};
+    float const rn = sqrtf(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
+    if (rn < 1e-6f) return;  // straight up or straight down: there is no right
+    for (int i = 0; i < 3; i++) right[i] /= rn;
+
+    // Full deflection on every axis the keys are asking for, so a press is
+    // "all the authority there is" (flight/control.h) and the ship's
+    // response is the rocket's, not the keyboard's.
+    float w[3] = {0.0f, 0.0f, 0.0f};
+    float const a = NISP_MANUAL_TORQUE_KNM;
+    for (int i = 0; i < 3; i++) {
+        if (act_held(mask, NISP_BACK)) w[i] += up[i] * a;
+        if (act_held(mask, NISP_FORWARD)) w[i] -= up[i] * a;
+        if (act_held(mask, NISP_RIGHT)) w[i] += right[i] * a;
+        if (act_held(mask, NISP_LEFT)) w[i] -= right[i] * a;
+        if (act_held(mask, NISP_ROLL_RIGHT)) w[i] -= nose[i] * a;
+        if (act_held(mask, NISP_ROLL_LEFT)) w[i] += nose[i] * a;
+    }
+
+    nisp_quat_rotate_inv(&s_mission.ship.q, w, out);
+}
+
+// The keys, once a frame, into what the mission is asked to do. The
+// throttle is held and integrates; everything else is an edge, because a
+// key held down is not the same command pressed sixty times.
+static void fill_control(nisp_actions_t const mask, nisp_actions_t const pressed, float dt) {
+    float const scale = act_held(mask, NISP_BOOST) ? 2.5f : 1.0f;
+    if (act_held(mask, NISP_UP)) s_ctl.throttle += 0.6f * scale * dt;
+    if (act_held(mask, NISP_DOWN)) s_ctl.throttle -= 0.6f * scale * dt;
+    if (s_ctl.throttle < 0.0f) s_ctl.throttle = 0.0f;
+    if (s_ctl.throttle > 1.0f) s_ctl.throttle = 1.0f;
+
+    if (act_held(pressed, NISP_CUT)) {
+        s_ctl.cut = true;
+        s_ctl.throttle = 0.0f;
+    }
+    if (act_held(pressed, NISP_STAGE)) s_ctl.stage = true;
+    if (act_held(pressed, NISP_CHUTE)) s_ctl.chute = true;
+    if (act_held(pressed, NISP_LEGS)) s_ctl.legs = true;
+    if (act_held(pressed, NISP_SAS)) s_ctl.sas = (s_ctl.sas + 1) % NISP_SAS_COUNT;
+    if (act_held(pressed, NISP_RCS)) s_ctl.rcs = !s_ctl.rcs;
+
+    if (act_held(pressed, NISP_WARP_UP)) {
+        int const i = nisp_warp_index_for(s_ctl.warp) + 1;
+        s_ctl.warp = nisp_warp_level(i < nisp_warp_levels() ? i : nisp_warp_levels() - 1);
+    }
+    if (act_held(pressed, NISP_WARP_DOWN)) {
+        int const i = nisp_warp_index_for(s_ctl.warp) - 1;
+        s_ctl.warp = nisp_warp_level(i > 0 ? i : 0);
+    }
+
+    manual_torque(mask, s_ctl.torque);
+}
+
 // --- Opening and leaving a world ----------------------------------------
 
 static void go_title(void) {
     s_mode = MODE_TITLE;
     s_slot = -1;
     s_bench = false;
+    s_flying = false;
     s_info = false;
-    s_vel[0] = s_vel[1] = s_vel[2] = 0.0f;
+    s_look_yaw = s_look_pitch = 0.0f;
     nisp_scene_init(BENCH_SEED);
-    title_pose(0.0, &s_pose);
+    nisp_camera_title(&s_cam, 0.0);
     menu_open_title();
+    music_set_context(MUSIC_MENU);
     set_content("title");
 }
 
-// The world is open: the scene is built from its seed, the camera is where
-// the save left it, and the ship is standing still.
-static void open_game(int slot, nisp_game_t const* game) {
+// The world is open and nothing is flying: the island from the save's seed,
+// and the Spaceport hub over it (plan 4.7). A world is not a mission --
+// which blueprint leaves the pad is a separate decision the hub makes.
+static void open_world(int slot, nisp_game_t const* game) {
     s_game = *game;
     s_slot = slot;
     s_bench = false;
-    s_vel[0] = s_vel[1] = s_vel[2] = 0.0f;
-    s_pose = game->pose;
+    s_flying = false;
+    s_look_yaw = s_look_pitch = 0.0f;
     nisp_scene_init(game->seed);
+    nisp_camera_title(&s_cam, 0.0);
+
+    s_mode = MODE_WORLD;
+    menu_open_spaceport(slot);
+    music_set_context(MUSIC_MENU);
+    set_content("spaceport");
+}
+
+// A blueprint leaves the pad (plan 5.6). The design is the one that was
+// chosen and not a stand-in, so the pad, the physics and the HUD are the
+// ones the drawing described. The mission clock starts at the launch, which
+// is also where the content clock restarts: t == 0 is standing on the pad.
+static void launch_design(nisp_design_t const* design) {
+    s_design = *design;
+    s_bench = false;
+    s_look_yaw = s_look_pitch = 0.0f;
+
+    nisp_mission_launch(&s_mission, &s_design, BODY_BOB, 0.0);
+    nisp_control_init(&s_ctl);
+    nisp_mission_readout(&s_mission, &s_readout);
+    nisp_camera_chase(&s_cam, &s_mission.ship, 0.0, ship_back_m(&s_mission.ship),
+                      ship_up_m(&s_mission.ship));
+    s_flying = true;
+
     s_mode = MODE_PLAY;
     menu_close();
+    music_set_context(MUSIC_NONE);  // on the pad, in the air: silence (plan 5.8)
     set_content("space");
+}
+
+// Engineering (plan 4.2-4.6): blue paper and nothing else. `design` == NULL
+// starts a fresh unnamed drawing; otherwise the saved blueprint is what is
+// on the paper, and Save writes over it.
+static void open_engineering(nisp_design_t const* design) {
+    nisp_builder_open(&s_builder, design);
+    s_bench = false;
+    s_mode = MODE_ENGINEERING;
+    menu_close();
+    music_set_context(MUSIC_ENGINEERING);
+    set_content("engineering");
+}
+
+// Backing out of Engineering leaves the drawing behind it: an unsaved one is
+// simply gone, which is what "working design" means (plan 4.6).
+static void close_engineering(void) {
+    if (s_slot >= 0) {
+        s_mode = MODE_WORLD;
+        menu_open_spaceport(s_slot);
+        set_content("spaceport");
+    } else {
+        s_mode = MODE_TITLE;
+        menu_open_title();
+        set_content("title");
+    }
+    music_set_context(MUSIC_MENU);
 }
 
 // The scripted flight a test flies. It touches no save: a test of the
@@ -175,16 +431,22 @@ static void open_bench(void) {
     s_game = (nisp_game_t){.name = "Bench", .seed = BENCH_SEED, .flown = 0.0f};
     s_slot = -1;
     s_bench = true;
-    s_vel[0] = s_vel[1] = s_vel[2] = 0.0f;
+    s_look_yaw = s_look_pitch = 0.0f;
     nisp_scene_init(BENCH_SEED);
+
+    bench_orbit(0.0);
+    s_flying = true;
+
     s_mode = MODE_PLAY;
     menu_close();
+    music_set_context(MUSIC_SPACE);
     set_content("space");
 }
 
 static void save_open(char const* news) {
     if (s_slot < 0) return;  // the bench has nothing to save
-    s_game.pose = s_pose;
+    // What a save keeps is the world and the name, not the flight: a
+    // mission is resumed from the mission itself, which is plan 9.1.
     if (save_write(s_slot, &s_game)) {
         flash(news);
         menu_status(news);
@@ -195,10 +457,7 @@ static void save_open(char const* news) {
 }
 
 static void leave(void) {
-    if (s_slot >= 0) {
-        s_game.pose = s_pose;
-        save_write(s_slot, &s_game);  // best effort: leaving should not lose a flight
-    }
+    if (s_slot >= 0) save_write(s_slot, &s_game);  // best effort: leaving should not lose a flight
     if (se_stream_running()) se_stream_stop();
     audio_mixer_shutdown();
     logo_free();
@@ -213,7 +472,7 @@ static void handle_cmd(menu_cmd_t const* cmd) {
         case MENU_CMD_PLAY: {
             nisp_game_t game;
             if (save_load(cmd->slot, &game)) {
-                open_game(cmd->slot, &game);
+                open_world(cmd->slot, &game);
             } else {
                 menu_status("Could not open that world");
             }
@@ -222,16 +481,28 @@ static void handle_cmd(menu_cmd_t const* cmd) {
         case MENU_CMD_CREATE: {
             nisp_game_t game;
             if (save_new(cmd->slot, cmd->name, cmd->seed, &game)) {
-                open_game(cmd->slot, &game);
+                open_world(cmd->slot, &game);
                 flash("A new world");
             } else {
                 menu_status("Could not create that world");
             }
             break;
         }
+        case MENU_CMD_CLOSE_WORLD:
+            // The open world was deleted out from under the flight (plan 1.2).
+            s_slot = -1;
+            s_flying = false;
+            s_mode = MODE_TITLE;
+            nisp_camera_title(&s_cam, 0.0);
+            break;
         case MENU_CMD_RESUME:
-            menu_close();
-            s_mode = MODE_PLAY;
+            // "Continue mission" is only a mission if one is flying (plan 4.7).
+            if (s_flying) {
+                menu_close();
+                s_mode = MODE_PLAY;
+            } else {
+                menu_status("No mission in progress");
+            }
             break;
         case MENU_CMD_SAVE: save_open("Saved"); break;
         case MENU_CMD_SAVE_QUIT:
@@ -240,133 +511,63 @@ static void handle_cmd(menu_cmd_t const* cmd) {
             break;
         case MENU_CMD_LEAVE: leave(); break;
         case MENU_CMD_STREAM: s_stream_wanted = true; break;
+
+        case MENU_CMD_BUILD: open_engineering(NULL); break;
+        case MENU_CMD_ENGINEERING: {
+            nisp_design_t design;
+            if (nisp_design_load(cmd->name, &design)) {
+                open_engineering(&design);
+            } else {
+                menu_status("Could not read that blueprint");
+            }
+            break;
+        }
+        case MENU_CMD_LAUNCH: {
+            nisp_design_t design;
+            if (nisp_design_load(cmd->name, &design)) {
+                launch_design(&design);
+                flash(cmd->name);
+            } else {
+                menu_status("Could not read that blueprint");
+            }
+            break;
+        }
+        case MENU_CMD_NAME:
+            // The name the text entry accepted, for the drawing Engineering
+            // is holding (D-11). The panel closed itself on the way out.
+            nisp_builder_set_name(&s_builder, cmd->name);
+            break;
+
         case MENU_CMD_NONE: break;
     }
 }
 
-// --- The ship -----------------------------------------------------------
+// --- Flying one frame ---------------------------------------------------
 
-#define THRUST      9.0f   // m/s^2, on any axis
-#define BOOST_SCALE 2.5f
-#define DRAG        1.6f   // per second: off the stick, the ship settles
-#define TOP_SPEED   26.0f  // m/s
-#define CLEARANCE   1.7f   // the ship does not occupy the ground
-#define PITCH_LIMIT 1.5f   // just short of straight up or down
+// A mission frame: the keys into the control struct, the control struct
+// into the mission, the mission into the camera and the HUD. The order is
+// the mission's own (flight/mission.h); this only supplies the inputs and
+// reads the outputs.
+static void step_flight(nisp_actions_t const mask, nisp_actions_t const pressed, double dt) {
+    fill_control(mask, pressed, (float)dt);
+    nisp_mission_step(&s_mission, &s_ctl, dt);
+    nisp_mission_readout(&s_mission, &s_readout);
 
-static void fly(nisp_actions_t const mask, float dt) {
-    // The ship's own axes at zero roll -- the same basis the camera is
-    // built from (se_scene.c, camera_build_basis), so what you aim at is
-    // what you thrust towards.
-    float const cy = cosf(s_pose.yaw), sy = sinf(s_pose.yaw);
-    float const cp = cosf(s_pose.pitch), sp = sinf(s_pose.pitch);
-    float const fwd[3]   = {sy * cp, -sp, cy * cp};
-    float const right[3] = {cy, 0.0f, -sy};
-
-    float const scale = act_held(mask, NISP_BOOST) ? BOOST_SCALE : 1.0f;
-    float a[3] = {0.0f, 0.0f, 0.0f};
-    if (act_held(mask, NISP_FORWARD)) {
-        a[0] += fwd[0];
-        a[1] += fwd[1];
-        a[2] += fwd[2];
-    }
-    if (act_held(mask, NISP_BACK)) {
-        a[0] -= fwd[0];
-        a[1] -= fwd[1];
-        a[2] -= fwd[2];
-    }
-    if (act_held(mask, NISP_RIGHT)) {
-        a[0] += right[0];
-        a[1] += right[1];
-        a[2] += right[2];
-    }
-    if (act_held(mask, NISP_LEFT)) {
-        a[0] -= right[0];
-        a[1] -= right[1];
-        a[2] -= right[2];
-    }
-    // Up and down are the WORLD's, not the ship's: the keys say "Thrust
-    // up", and a ship pointed at the horizon should still go up.
-    if (act_held(mask, NISP_UP)) a[1] += 1.0f;
-    if (act_held(mask, NISP_DOWN)) a[1] -= 1.0f;
-
-    for (int i = 0; i < 3; i++) {
-        s_vel[i] += a[i] * THRUST * scale * dt;
-        s_vel[i] -= s_vel[i] * DRAG * dt;
-    }
-
-    float speed = sqrtf(s_vel[0] * s_vel[0] + s_vel[1] * s_vel[1] + s_vel[2] * s_vel[2]);
-    if (speed > TOP_SPEED) {
-        float const k = TOP_SPEED / speed;
-        s_vel[0] *= k;
-        s_vel[1] *= k;
-        s_vel[2] *= k;
-        speed = TOP_SPEED;
-    }
-
-    s_pose.x += s_vel[0] * dt;
-    s_pose.y += s_vel[1] * dt;
-    s_pose.z += s_vel[2] * dt;
-
-    // Ground is ground. Landing sets the ship down and kills the descent,
-    // which is the difference between a landing and a hole.
-    float const floor = nisp_scene_ground(s_pose.x, s_pose.z) + CLEARANCE;
-    if (s_pose.y < floor) {
-        s_pose.y = floor;
-        if (s_vel[1] < 0.0f) s_vel[1] = 0.0f;
-    }
-
-    s_game.flown += speed * dt;
-
-    float dyaw = 0.0f, dpitch = 0.0f;
-    input_look(mask, &dyaw, &dpitch);
-    s_pose.yaw += dyaw * dt;
-    s_pose.pitch += dpitch * dt;
-    if (s_pose.pitch > PITCH_LIMIT) s_pose.pitch = PITCH_LIMIT;
-    if (s_pose.pitch < -PITCH_LIMIT) s_pose.pitch = -PITCH_LIMIT;
+    // Part N4: the mission decides the context, this decides that the
+    // audio layer obeys it. Space above 70 km, silence below 60, and the
+    // band is the mission's, not a threshold chosen here (flight/mission.h).
+    music_set_context(nisp_mission_music_space(&s_mission) ? MUSIC_SPACE : MUSIC_NONE);
 }
 
-// --- The scripted flight (testkit/devtest.h) ----------------------------
-
-// Out from the pad, round the island, climbing: everything a frame needs
-// is a function of the time since the content started, so the same
-// millisecond draws the same picture in a realtime run and in a shot test
-// that sets the clock.
-#define BENCH_RATE  0.6f   // radians a second round the pad
-#define BENCH_R0    14.0f  // metres, and ...
-#define BENCH_RK    1.2f   // ... metres a second further out
-#define BENCH_H0    6.0f   // metres up, and ...
-#define BENCH_HK    0.8f   // ... metres a second higher
-#define BENCH_SECS  20.0f  // what a perf test runs for, unasked
-
-static void bench_pose(double t, nisp_pose_t* out) {
-    float const k = (float)t;
-    float const a = BENCH_RATE * k;
-    float const r = BENCH_R0 + BENCH_RK * k;
-    float const h = BENCH_H0 + BENCH_HK * k;
-
-    out->x = cosf(a) * r;
-    out->y = h;
-    out->z = sinf(a) * r;
-    // Looking back at the obelisk, and down by the ship's own height.
-    out->yaw = atan2f(-cosf(a), -sinf(a));
-    out->pitch = atan2f(h, r);
-}
-
-// The HUD's "m flown", for the same path: integrated over fixed steps of
-// `t` rather than accumulated frame by frame, so it too is a function of
-// the clock and a reference screenshot keeps its hash.
-static float bench_flown(float t) {
-    int const steps = 64;
-    float const dt = t / (float)steps;
-    if (dt <= 0.0f) return 0.0f;
-    float sum = 0.0f;
-    for (int i = 0; i < steps; i++) {
-        float const mid     = ((float)i + 0.5f) * dt;
-        float const r       = BENCH_R0 + BENCH_RK * mid;
-        float const tangent = BENCH_RATE * r;
-        sum += sqrtf(tangent * tangent + BENCH_RK * BENCH_RK + BENCH_HK * BENCH_HK) * dt;
-    }
-    return sum;
+// The chase camera, and the look keys on top of it. The offsets are kept
+// separately from the camera so that whatever aims the camera -- the ship,
+// the title's drift -- is never disturbed by where the player happened to
+// be looking last frame.
+static void chase_camera(double t) {
+    nisp_camera_chase(&s_cam, &s_mission.ship, t, ship_back_m(&s_mission.ship),
+                      ship_up_m(&s_mission.ship));
+    s_cam.yaw += s_look_yaw;
+    s_cam.pitch += s_look_pitch;
 }
 
 // --- The test kit -------------------------------------------------------
@@ -378,8 +579,16 @@ static bool content_select(char const* name) {
         go_title();
         return true;
     }
-    if (!strcmp(name, "space") || !strcmp(name, "bench") || !strcmp(name, "island")) {
+    // "space" is the flight bench. "orbit" and "bench" are aliases, and
+    // "island" is what it was called before the planet replaced the height
+    // map -- kept so an old manifest or an old muscle memory still works.
+    if (!strcmp(name, "space") || !strcmp(name, "orbit") || !strcmp(name, "bench") ||
+        !strcmp(name, "island")) {
         open_bench();
+        return true;
+    }
+    if (!strcmp(name, "engineering")) {
+        open_engineering(NULL);
         return true;
     }
     // Every menu screen is a piece of content too: they are drawn from
@@ -454,8 +663,13 @@ static void frame_stats(void) {
 
     char split[192];
     prof_flush(split, sizeof(split), frame_ms);
-    ESP_LOGI(TAG, "%s | %s t=%.1f  x %+.1f y %+.1f z %+.1f", split, s_content, showtime_now() - s_content_t0,
-             (double)s_pose.x, (double)s_pose.y, (double)s_pose.z);
+    if (s_flying) {
+        ESP_LOGI(TAG, "%s | %s t=%.1f  alt %.1f km  %.0f m/s  apo %.1f peri %.1f", split, s_content,
+                 s_mission.t, (double)s_readout.alt_km, (double)s_readout.speed_ms,
+                 (double)s_readout.apoapsis_km, (double)s_readout.periapsis_km);
+    } else {
+        ESP_LOGI(TAG, "%s | %s t=%.1f", split, s_content, showtime_now() - s_content_t0);
+    }
 
     s_window_us = 0;
     s_frames    = 0;
@@ -538,14 +752,26 @@ static void on_backdrop(pax_buf_t* fb, void* user) {
 
 static void on_update(float dt, void* user) {
     (void)user;
+    (void)dt;  // the mission runs on the show clock, not on the engine's dt
 
     showtime_frame();
     devtest_update();
 
+    // The frame's length, as the show sees it. Taking it from the show
+    // clock rather than from the engine is what makes a mission and a
+    // screenshot advance by the same amount (testkit/devtest.h), and the
+    // clamp is what keeps a stall -- a screenshot write, a slow frame --
+    // from becoming a physics step nobody would survive.
+    double const now = showtime_now();
+    double frame_dt = (s_show_last > 0.0) ? (now - s_show_last) : 0.0;
+    if (frame_dt < 0.0) frame_dt = 0.0;
+    if (frame_dt > 0.1) frame_dt = 0.1;
+    s_show_last = now;
+
     menu_cmd_t const cmd = menu_update();
     handle_cmd(&cmd);
 
-    double const t = showtime_now() - s_content_t0;
+    double const t = now - s_content_t0;
 
     // The keyboard is read every frame, menu up or not, so the "which keys
     // went down since the last frame" edge is never stale on the frame a
@@ -553,20 +779,61 @@ static void on_update(float dt, void* user) {
     nisp_actions_t const mask    = input_sample();
     nisp_actions_t const pressed = input_pressed();
 
-    if (s_mode == MODE_TITLE) {
-        title_pose(t, &s_pose);
+    music_update((float)frame_dt);
+
+    // Engineering has its own keyboard handling: the sheet polls, the name
+    // editor is a menu panel and owns every key while it is up (D-11).
+    if (s_mode == MODE_ENGINEERING) {
+        if (menu_active()) return;
+
+        switch (nisp_builder_step(&s_builder, pressed, (float)frame_dt)) {
+            case NISP_BUILD_SAVE:
+                nisp_builder_say(&s_builder, nisp_design_save(&s_builder.design) ? "Saved to the card"
+                                                                                 : "Could not save");
+                break;
+            case NISP_BUILD_NAME:
+                menu_open_working_name(s_builder.design.name);
+                break;
+            case NISP_BUILD_LAUNCH:
+                // A design is on the card before it leaves the pad (D-11), so
+                // the hub's Launch list and the flight never disagree about
+                // what flew.
+                if (!nisp_design_save(&s_builder.design)) {
+                    nisp_builder_say(&s_builder, "Could not save, so not launching");
+                    break;
+                }
+                launch_design(&s_builder.design);
+                break;
+            case NISP_BUILD_LEAVE: close_engineering(); break;
+            default: break;
+        }
+        return;
+    }
+
+    if (s_mode == MODE_TITLE || s_mode == MODE_WORLD) {
+        nisp_camera_title(&s_cam, t);
         return;
     }
 
     if (s_bench) {
-        bench_pose(t, &s_pose);
-        s_game.flown = bench_flown((float)t);
+        bench_frame(t);
+        chase_camera(t);
         return;
     }
 
-    if (menu_active()) return;  // paused: the ship holds its position
+    if (menu_active()) return;  // paused: the mission holds its position
 
-    fly(mask, dt);
+    step_flight(mask, pressed, frame_dt);
+    chase_camera(t);
+
+    // The look keys are the camera's, not the ship's: they move where you
+    // are looking, not where you are going (plan 6.2).
+    float dyaw = 0.0f, dpitch = 0.0f;
+    input_look(mask, &dyaw, &dpitch);
+    s_look_yaw += dyaw * (float)frame_dt;
+    s_look_pitch += dpitch * (float)frame_dt;
+    if (s_look_pitch > 1.4f) s_look_pitch = 1.4f;
+    if (s_look_pitch < -1.4f) s_look_pitch = -1.4f;
 
     if (act_held(pressed, NISP_PAUSE)) {
         s_mode = MODE_PAUSED;
@@ -597,7 +864,10 @@ static void on_render(pax_buf_t* fb, void* user) {
         }
     }
 
-    bool const half       = s_half_ok && settings_half_res();
+    // Engineering is a flat drawing on blue paper: no scene, no half-size
+    // layer, no upscale, no PPA job (engineering/builder.c).
+    bool const sheet      = (s_mode == MODE_ENGINEERING);
+    bool const half       = !sheet && s_half_ok && settings_half_res();
     pax_buf_t* const target = half ? &s_half.buf : fb;
     scene_set_render_scale(half ? 2 : 1);
 
@@ -613,14 +883,16 @@ static void on_render(pax_buf_t* fb, void* user) {
         // Straight into the framebuffer, so a CPU clear: the CPU draws
         // into this buffer next, and a DMA fill under its cache is a
         // coherence problem this path is not worth having.
-        pax_background(fb, SKY_ARGB);
+        pax_background(fb, sheet ? NISP_BLUEPRINT_ARGB : SKY_ARGB);
     }
     prof_end(PROF_FILL);
 
     // The island, behind everything: the title's drift, the ship's view,
     // and the frozen view a menu sits on. It times its own phases.
-    int const view = (s_mode == MODE_TITLE) ? NISP_VIEW_COUNT - 1 : settings_view();
-    int64_t const rast_us = nisp_scene_render(target, &s_pose, view, t);
+    int const view =
+        (s_mode == MODE_TITLE || s_mode == MODE_WORLD) ? NISP_VIEW_COUNT - 1 : settings_view();
+    int64_t const rast_us =
+        sheet ? 0 : nisp_scene_render(target, &s_cam, s_flying ? &s_mission.ship : NULL, view, t);
 
     if (half) {
         prof_begin(PROF_WAIT);
@@ -649,6 +921,11 @@ static void on_render(pax_buf_t* fb, void* user) {
     prof_begin(PROF_OVERLAY);
     if (s_mode == MODE_TITLE) {
         if (!menu_in_panel()) title_draw(fb, t);
+    } else if (sheet) {
+        nisp_builder_draw(fb, &s_builder);
+    } else if (s_mode == MODE_WORLD) {
+        // The hub is the screen; the only overlay it wants is the news line.
+        if (showtime_now() < s_msg_until) hud_flash(fb, s_msg);
     } else {
         hud_stats_t const stats = {
             .fps     = s_fps,
@@ -656,7 +933,7 @@ static void on_render(pax_buf_t* fb, void* user) {
             .rast_us = rast_us,
             .half    = half,
         };
-        hud_draw(fb, &s_game, &s_pose, s_info, &stats);
+        hud_draw(fb, &s_game, s_flying ? &s_mission : NULL, s_flying ? &s_readout : NULL, s_info, &stats);
         if (s_mode == MODE_PLAY) hud_reticle(fb);
         if (showtime_now() < s_msg_until) hud_flash(fb, s_msg);
     }

@@ -74,6 +74,36 @@ void nisp_design_init(nisp_design_t* d) {
     nisp_design_clamp(d);
 }
 
+// The rocket the game flies before the player has built one: the pad
+// default (main.c) and the bench's ship. Two stages, RCS on both so it can
+// be pointed, legs on the bottom stage so a landing is possible, and small
+// enough that a test flight is cheap. Named, because a mission has to call
+// the ship something.
+void nisp_design_demo(nisp_design_t* d) {
+    if (d == NULL) return;
+    nisp_design_init(d);
+    snprintf(d->name, sizeof(d->name), "%s", "DEMO");
+    d->stage_count = 2;
+    d->stage[0] = (nisp_stage_t){
+        .kind = NISP_KIND_UPPER,
+        .diameter = 0,
+        .length = 3,
+        .engine = NISP_ENGINE_RELION,
+        .engine_count = 1,
+        .rcs = true,
+    };
+    d->stage[1] = (nisp_stage_t){
+        .kind = NISP_KIND_MAIN,
+        .diameter = 1,
+        .length = 6,
+        .engine = NISP_ENGINE_SKIPPER,
+        .engine_count = 1,
+        .rcs = true,
+        .legs = NISP_LEGS_4,
+    };
+    nisp_design_clamp(d);
+}
+
 void nisp_design_clamp(nisp_design_t* d) {
     if (d == NULL) return;
     d->stage_count = clamp_int(d->stage_count, 1, NISP_DESIGN_STAGE_MAX);

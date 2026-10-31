@@ -42,6 +42,12 @@
 #include "rocket/parts.h"
 #include "rocket/stack.h"
 
+#include "common/quat.h"
+#include "flight/control.h"
+#include "flight/mission.h"
+#include "flight/physics.h"
+#include "flight/warp.h"
+
 static int s_fail = 0;
 static int s_checks = 0;
 
@@ -53,6 +59,20 @@ static int s_checks = 0;
             printf("\n");                                       \
             s_fail++;                                           \
         }                                                       \
+    } while (0)
+
+// The same, for a label that is a variable rather than a literal -- the
+// rows in a table of cases have names, and a failure should print the name
+// of the row that failed.
+#define CHECK_MSG(cond, msg)                                          \
+    do {                                                           \
+        s_checks++;                                                \
+        if (!(cond)) {                                             \
+            printf("  FAIL: %s\n", (msg));                         \
+            s_fail++;                                              \
+        } else {                                                   \
+            printf("  ok: %s\n", (msg));                           \
+        }                                                          \
     } while (0)
 
 // Compare a computed value against a hand-written one, with the tolerance
@@ -1119,6 +1139,892 @@ static void case10_split(void) {
     CHECK_NEAR(frag_com(&s), s.com_x, 1e-3, "the staged stack's CoM matches its rows, m");
 }
 
+// --- Case 11: coasting, warp, and the SOI handover (Part F1, F4) -------
+
+// One stage, one engine: the shape every flight case starts from.
+static nisp_design_t flight_design(char const* name, int kind, int dia, int len, int engine,
+                                   int engines, bool rcs, int legs) {
+    nisp_design_t d;
+    memset(&d, 0, sizeof(d));
+    snprintf(d.name, sizeof(d.name), "%s", name);
+    d.stage_count = 1;
+    d.stage[0].kind = kind;
+    d.stage[0].diameter = dia;
+    d.stage[0].length = len;
+    d.stage[0].engine = engine;
+    d.stage[0].engine_count = engines;
+    d.stage[0].rcs = rcs;
+    d.stage[0].legs = legs;
+    nisp_design_clamp(&d);
+    return d;
+}
+
+static double dist3(double const a[3], double const b[3]) {
+    double d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+    return mag3(d);
+}
+
+// A ship at +r on the X axis, moving along -z: the prograde direction at
+// the pad (Part B2), so every flight case here is a prograde orbit.
+static nisp_vessel_t radius_vessel(int body, double r_km, double v_km, nisp_design_t const* d) {
+    nisp_state_t st;
+    st.r[0] = (float)r_km; st.r[1] = 0.0f; st.r[2] = 0.0f;
+    st.v[0] = 0.0f; st.v[1] = 0.0f; st.v[2] = (float)-v_km;
+    float nose[3] = {0.0f, 0.0f, -1.0f};
+    nisp_vessel_t out;
+    nisp_vessel_orbit(&out, d, body, &st, 0.0, nose);
+    return out;
+}
+
+static nisp_vessel_t circular_vessel(int body, double r_km, nisp_design_t const* d) {
+    return radius_vessel(body, r_km, sqrt(nisp_body(body)->mu / r_km), d);
+}
+
+// A ship at apoapsis -ra, periapsis rp, on the same X-Z plane.
+static nisp_vessel_t apside_vessel(int body, double ra_km, double rp_km, nisp_design_t const* d) {
+    double const a = 0.5 * (ra_km + rp_km);
+    double const va = sqrt(nisp_body(body)->mu * (2.0 / ra_km - 1.0 / a));
+    nisp_state_t st;
+    st.r[0] = (float)-ra_km; st.r[1] = 0.0f; st.r[2] = 0.0f;
+    st.v[0] = 0.0f; st.v[1] = 0.0f; st.v[2] = (float)va;
+    float nose[3] = {0.0f, 0.0f, 1.0f};
+    nisp_vessel_t out;
+    nisp_vessel_orbit(&out, d, body, &st, 0.0, nose);
+    return out;
+}
+
+// The coast is the fast path: at warp 10,000 a frame is 167 simulated
+// seconds and it costs one Kepler solve (Part O3). So it has to agree with
+// a dumb RK4, and it has to agree to well under a metre per frame or a
+// 400,000 km transfer leg drifts by a thousand kilometres.
+static void coast_matches_rk4(int body, double r_km) {
+    nisp_design_t d = flight_design("COAST", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    nisp_vessel_t v = circular_vessel(body, r_km, &d);
+
+    nisp_state_t start;
+    nisp_vessel_state(&v, &start);
+
+    // One warp-1000 frame at 60 Hz.
+    double const hop = 1000.0 / 60.0;
+    double const used = nisp_vessel_coast(&v, 0.0, hop);
+    CHECK_NEAR(used, hop, 1e-6, "coast covers the whole frame");
+
+    nisp_state_t ref = start;
+    integrate_two_body(body, &ref, 0.01, (int)(hop / 0.01));
+
+    double const got_p[3] = {v.pos_km[0], v.pos_km[1], v.pos_km[2]};
+    double const want_p[3] = {ref.r[0], ref.r[1], ref.r[2]};
+    double const got_v[3] = {v.vel_kms[0], v.vel_kms[1], v.vel_kms[2]};
+    double const want_v[3] = {ref.v[0], ref.v[1], ref.v[2]};
+    char tag[96];
+    snprintf(tag, sizeof(tag), "coast position vs RK4 at %.0f km", r_km);
+    CHECK_NEAR(dist3(got_p, want_p), 0.0, 0.05, tag);
+    snprintf(tag, sizeof(tag), "coast velocity vs RK4 at %.0f km", r_km);
+    CHECK_NEAR(dist3(got_v, want_v), 0.0, 1e-4, tag);
+}
+
+// A coast stops where the analytic answer stops being an answer: the edge
+// of the air, or the ground. It reports the time it actually covered so
+// the ticks can take the rest of the frame (F-34). Getting this wrong is
+// not a slow ship, it is a ship that has been somewhere else.
+static void coast_stops_at_the_air(void) {
+    nisp_design_t d = flight_design("COAST", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    struct { double ra, rp; double want_used; double want_alt; char const* what; } rows[] = {
+        {850.0, 620.0, 771.5, 70.0, "periapsis 20 km: stops in the air"},
+        {850.0, 500.0, 548.5, 70.0, "periapsis underground: stops in the air"},
+        {850.0, 700.0, 1000.0, 106.757, "periapsis 100 km: never stops"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_vessel_t v = apside_vessel(BODY_BOB, rows[i].ra, rows[i].rp, &d);
+        double const used = nisp_vessel_coast(&v, 0.0, 1000.0);
+        float const alt = nisp_altitude(v.body, v.pos_km);
+        CHECK_NEAR(used, rows[i].want_used, 1.0, rows[i].what);
+        CHECK_NEAR(alt, rows[i].want_alt, 0.01, "altitude it stopped at, km");
+    }
+}
+
+// The ladder and its refusals (Part F4). Every row is a ship at radius r on
+// an ellipse whose other apsis is 4,600 km, so the low rows are on the way
+// down and the high rows are in the middle of nowhere.
+static void warp_ladder(void) {
+    nisp_design_t d = flight_design("WARP", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    struct { double r, other; float req; int th, st; float warp; double dt; int sub; int coast;
+             int capped; char const* reason; } rows[] = {
+        {640.0, 4600.0, 1000.0f, 0, 0, 10.0f, 1.0 / 6.0, 9, 0, 0, "max atmosphere"},
+        {680.0, 4600.0, 1000.0f, 0, 0, 1000.0f, 50.0 / 3.0, 0, 1, 0, ""},
+        {4600.0, 4600.0, 1000.0f, 1, 0, 100.0f, 5.0 / 3.0, 84, 0, 0, "max engine burning"},
+        {4600.0, 4600.0, 10000.0f, 0, 0, 10000.0f, 500.0 / 3.0, 0, 1, 0, ""},
+        {4600.0, 4600.0, 10000.0f, 0, 1, 100.0f, 5.0 / 3.0, 84, 0, 0, "max steering"},
+        {4600.0, 4600.0, 100.0f, 1, 0, 100.0f, 5.0 / 3.0, 84, 0, 0, ""},
+        {680.0, 4600.0, 10000.0f, 0, 0, 1000.0f, 50.0 / 3.0, 0, 1, 0, "max below 100 km"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        double const a = 0.5 * (rows[i].r + rows[i].other);
+        double const v = sqrt(nisp_body(BODY_BOB)->mu * (2.0 / rows[i].r - 1.0 / a));
+        nisp_vessel_t ship = radius_vessel(BODY_BOB, rows[i].r, v, &d);
+
+        nisp_warp_step_t w;
+        nisp_warp_plan(&ship, rows[i].req, 1.0 / 60.0, rows[i].th != 0, rows[i].st != 0, &w);
+        CHECK_NEAR(w.warp, rows[i].warp, 1e-3, "warp this frame uses");
+        CHECK_NEAR(w.dt_sim, rows[i].dt, 1e-6, "simulated seconds it advances");
+        CHECK(w.substeps == rows[i].sub, "substeps match");
+        CHECK(w.coasting == (rows[i].coast != 0), "coasting matches");
+        CHECK(w.capped == (rows[i].capped != 0), "capped matches");
+        CHECK(strcmp(w.reason, rows[i].reason) == 0, "the refusal names the rule");
+    }
+}
+
+// The substep cap is the other refusal: a frame that would need 834 ticks
+// gets 200, and the warp comes down to what 200 ticks can actually pay for.
+static void warp_substep_cap(void) {
+    nisp_design_t d = flight_design("WARP", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    nisp_vessel_t ship = circular_vessel(BODY_BOB, 4600.0, &d);
+    nisp_warp_step_t w;
+    nisp_warp_plan(&ship, 1000.0f, 0.1, true, false, &w);
+    CHECK_NEAR(w.warp, 40.0, 1e-3, "warp after the tick cap");
+    CHECK_NEAR(w.dt_sim, 4.0, 1e-6, "a capped frame is 4 simulated seconds");
+    CHECK(w.substeps == NISP_SUBSTEP_MAX, "the cap is NISP_SUBSTEP_MAX ticks");
+    CHECK(w.capped, "the cap says so");
+    CHECK(strcmp(w.reason, "max engine burning") == 0, "and says which rule");
+}
+
+// A coast is refused when its next periapsis is in the air (F-34): the
+// frame would fly through an atmosphere it never samples, which is a
+// different trajectory rather than a coarse one.
+static void warp_periapsis_refusal(void) {
+    nisp_design_t d = flight_design("WARP", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    struct { int body; double ra, rp; float peri; float warp; char const* reason; } rows[] = {
+        {BODY_BOB, 5000.0, 650.0, 50.0f, 10.0f, "max periapsis in air"},
+        {BODY_BOB, 5000.0, 700.0, 100.0f, 10000.0f, ""},
+        {BODY_BOB, 5000.0, 600.0, 0.0f, 10.0f, "max periapsis in air"},
+        {BODY_CHEESE, 3000.0, 150.0, -50.0f, 10.0f, "max periapsis underground"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_vessel_t ship = apside_vessel(rows[i].body, rows[i].ra, rows[i].rp, &d);
+        CHECK_NEAR(nisp_vessel_periapsis_alt_km(&ship), rows[i].peri, 0.01, "periapsis altitude, km");
+        nisp_warp_step_t w;
+        nisp_warp_plan(&ship, 10000.0f, 1.0 / 60.0, false, false, &w);
+        CHECK_NEAR(w.warp, rows[i].warp, 1e-3, "warp with a periapsis down there");
+        CHECK(strcmp(w.reason, rows[i].reason) == 0, "and says why the top rung is gone");
+        CHECK(w.coasting, "it is still a coast, just a slow one");
+    }
+}
+
+// Leaving Bob's sphere hands the ship to Frodo (Part O4). The reference is
+// the same step done the long way: an RK4 tick in Bob's frame, Bob's own
+// motion bolted on, and an RK4 tick in Frodo's.
+static void soi_handover_out(void) {
+    nisp_design_t d = flight_design("SOI", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    nisp_vessel_t ship = radius_vessel(BODY_BOB, 84360.0, 0.35, &d);  // just inside the sphere
+
+    nisp_state_t pre;
+    nisp_vessel_state(&ship, &pre);
+    double const dt = 0.02;
+    nisp_vessel_substep(&ship, NULL, 0.0, dt);
+    CHECK(ship.body == BODY_FRODO, "leaving Bob hands the ship to Frodo");
+
+    nisp_state_t ref = pre;
+    integrate_two_body(BODY_BOB, &ref, dt, 1);
+    double bp[3], bv[3];
+    nisp_body_relative(BODY_BOB, BODY_FRODO, dt, bp);
+    nisp_body_velocity(BODY_BOB, dt, bv);
+    nisp_state_t in_frodo;
+    for (int i = 0; i < 3; i++) {
+        in_frodo.r[i] = (float)(ref.r[i] + bp[i]);
+        in_frodo.v[i] = (float)(ref.v[i] + bv[i]);
+    }
+    integrate_two_body(BODY_FRODO, &in_frodo, dt, 1);
+
+    double const got[3] = {ship.pos_km[0], ship.pos_km[1], ship.pos_km[2]};
+    double const want[3] = {in_frodo.r[0], in_frodo.r[1], in_frodo.r[2]};
+    CHECK_NEAR(dist3(got, want), 0.0, 0.5, "position across the handover, km");
+    CHECK_NEAR(mag3(got), 13684200.0, 1000.0, "distance from Frodo afterwards, km");
+}
+
+// Entering Cheese's sphere is the handover that is easy to get wrong,
+// because the position and the velocity have to change frame together
+// (F-35). The test is the invariant, not the number: the ship is the same
+// ship before and after, so converting it back has to give what it was.
+static void soi_handover_in(void) {
+    nisp_design_t d = flight_design("SOI", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    double const t = 3000.0;
+    double cp[3], cv[3], bv[3];
+    nisp_body_relative(BODY_CHEESE, BODY_BOB, t, cp);
+    nisp_body_velocity(BODY_CHEESE, t, cv);
+    nisp_body_velocity(BODY_BOB, t, bv);
+
+    // A ship parked 2 km off Cheese, travelling with it: 542 m/s at
+    // 12,000 km, which is Cheese's circular speed at that radius.
+    nisp_state_t st;
+    st.r[0] = (float)(cp[0] + 2.0); st.r[1] = 2.0f; st.r[2] = (float)(cp[2] + 2.0);
+    for (int i = 0; i < 3; i++) st.v[i] = (float)(cv[i] - bv[i]);
+    float nose[3] = {0.0f, 0.0f, 1.0f};
+    nisp_vessel_t ship;
+    nisp_vessel_orbit(&ship, &d, BODY_BOB, &st, t, nose);
+    CHECK_NEAR(mag3((double[]){ship.vel_kms[0], ship.vel_kms[1], ship.vel_kms[2]}), 0.5424, 1e-3,
+               "speed relative to Bob before the switch, km/s");
+
+    nisp_state_t pre;
+    nisp_vessel_state(&ship, &pre);
+    nisp_vessel_substep(&ship, NULL, t, 0.02);
+    CHECK(ship.body == BODY_CHEESE, "Cheese's sphere takes over");
+
+    // Convert it back into Bob's frame and compare against the same tick
+    // done in Bob's frame: the tick is Bob's, and the handover happens at
+    // the end of it, so the two answers have to be the same answer.
+    nisp_state_t ref = pre;
+    integrate_two_body(BODY_BOB, &ref, 0.02, 1);
+
+    double rel[3], cv2[3], bv2[3];
+    nisp_body_relative(BODY_CHEESE, BODY_BOB, t + 0.02, rel);
+    nisp_body_velocity(BODY_CHEESE, t + 0.02, cv2);
+    nisp_body_velocity(BODY_BOB, t + 0.02, bv2);
+    double back_p[3], back_v[3];
+    for (int i = 0; i < 3; i++) {
+        back_p[i] = ship.pos_km[i] + rel[i];
+        back_v[i] = ship.vel_kms[i] + cv2[i] - bv2[i];
+    }
+    double const want_p[3] = {ref.r[0], ref.r[1], ref.r[2]};
+    double const want_v[3] = {ref.v[0], ref.v[1], ref.v[2]};
+    CHECK_NEAR(dist3(back_p, want_p), 0.0, 0.01, "the handover round trip, position km");
+    CHECK_NEAR(dist3(back_v, want_v), 0.0, 1e-4, "the handover round trip, km/s");
+    CHECK_NEAR(mag3(ship.pos_km), 335.295, 0.01, "distance from Cheese, km");
+}
+
+static void case11_coast_warp_soi(void) {
+    printf("case 11  a coast is analytic, warp refuses, and gravity changes hands\n");
+    coast_matches_rk4(BODY_BOB, 680.0);   // 80 km: the orbit everything else uses
+    coast_matches_rk4(BODY_BOB, 700.0);   // 100 km
+    coast_matches_rk4(BODY_BOB, 4600.0);  // 4,000 km: the slow, high one
+    coast_stops_at_the_air();
+    warp_ladder();
+    warp_substep_cap();
+    warp_periapsis_refusal();
+    soi_handover_out();
+    soi_handover_in();
+}
+
+
+// =====================================================================
+// case 12 -- control: what RCS buys, and what a ship does without it
+// ---------------------------------------------------------------------
+// Part F2's whole design decision is that stabilisation is something the
+// player builds, not something the game gives away. So the checks here are
+// the two halves of that: an RCS-equipped stack gets exactly the authority
+// its modules were bought for, and a stack without them gets exactly zero,
+// however the switches are set.
+// =====================================================================
+
+static nisp_design_t control_design(int rcs_all) {
+    nisp_design_t d = three_stage_design();
+    for (int i = 0; i < d.stage_count; i++) d.stage[i].rcs = rcs_all != 0;
+    nisp_design_clamp(&d);
+    return d;
+}
+
+static double mag3f(float const v[3]) { return sqrt((double)v[0] * v[0] + (double)v[1] * v[1] + (double)v[2] * v[2]); }
+
+// The 80 km circular orbit everything else in this file uses, with the nose
+// tipped `tilt_deg` away from prograde about -x.
+static nisp_vessel_t attitude_vessel(nisp_design_t const* d, double tilt_deg) {
+    double const r = 680.0;
+    nisp_state_t st;
+    st.r[0] = (float)r; st.r[1] = 0.0f; st.r[2] = 0.0f;
+    st.v[0] = 0.0f; st.v[1] = 0.0f; st.v[2] = (float)-sqrt(nisp_body(BODY_BOB)->mu / r);
+    double const th = tilt_deg * M_PI / 180.0;
+    float nose[3] = {0.0f, (float)sin(th), (float)-cos(th)};
+    nisp_vessel_t v;
+    nisp_vessel_orbit(&v, d, BODY_BOB, &st, 0.0, nose);
+    return v;
+}
+
+static double nose_dot_prograde(nisp_vessel_t const* v) {
+    float nn[3], pg[3];
+    nisp_vessel_nose(v, nn);
+    nisp_vessel_prograde(v, pg);
+    double dot = 0.0;
+    for (int i = 0; i < 3; i++) dot += (double)nn[i] * pg[i];
+    return dot;
+}
+
+static void control_budget(void) {
+    nisp_design_t const on = control_design(1), off = control_design(0);
+    nisp_stack_t s;
+
+    nisp_stack_build(&on, &s);
+    CHECK(nisp_control_rcs_modules(&s) == 3, "three RCS stages, three modules");
+    CHECK_NEAR(nisp_control_authority_knm(&s, true), 45.0, 1e-6, "authority, kN*m");
+    CHECK_NEAR(nisp_control_authority_knm(&s, false), 0.0, 1e-9, "the RCS switch off");
+
+    nisp_stack_build(&off, &s);
+    CHECK(nisp_control_rcs_modules(&s) == 0, "a design with no RCS has no modules");
+    CHECK_NEAR(nisp_control_authority_knm(&s, true), 0.0, 1e-9, "authority it can spend");
+
+    // Modules are bolted to a stage, so they leave with it (Part F5). The
+    // authority a ship has is a property of what is still attached to the
+    // capsule, which is why a stack that has thrown two stages steers with
+    // a third of what it launched with.
+    nisp_stack_build(&on, &s);
+    nisp_stack_advance(&s);
+    CHECK_NEAR(nisp_control_authority_knm(&s, true), 30.0, 1e-6, "authority after one stage");
+    nisp_stack_advance(&s);
+    CHECK_NEAR(nisp_control_authority_knm(&s, true), 15.0, 1e-6, "authority on the pod alone");
+}
+
+static void sas_aims_at_prograde(void) {
+    nisp_design_t const d = control_design(1);
+    nisp_vessel_t v = attitude_vessel(&d, 30.0);
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_PROGRADE;
+    ctl.throttle = 0.0f;
+
+    float target[3], axis[3], angle = 0.0f, tau[3];
+    CHECK(nisp_vessel_reference(&v, ctl.sas, target), "prograde is a direction SAS can aim at");
+    nisp_quat_error(&v.q, target, axis, &angle);
+    CHECK_NEAR(angle, 0.523599, 1e-4, "a 30 degree error, radians");
+    CHECK_NEAR(axis[0], -1.0, 1e-4, "the error axis, x");
+    CHECK_NEAR(axis[2], 0.0, 1e-4, "the error axis, z");
+
+    // A 30 degree error is far past the point where the controller is being
+    // gentle: it asks for the whole budget, in the direction that closes it.
+    nisp_control_torque(&v, &ctl, NISP_PHYS_DT, tau);
+    CHECK_NEAR(mag3f(tau), 45.0, 1e-3, "a big error spends the whole budget");
+    CHECK_NEAR(tau[0], -45.0, 1e-3, "and spends it the right way round");
+    CHECK_NEAR(v.stack.inertia_t_m2, 3144.4849, 1.0, "this stack's inertia, t*m^2");
+}
+
+static void sas_converges(void) {
+    nisp_design_t const d = control_design(1);
+    nisp_vessel_t v = attitude_vessel(&d, 30.0);
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_PROGRADE;
+    ctl.throttle = 0.0f;
+
+    CHECK_NEAR(nose_dot_prograde(&v), 0.866025, 1e-4, "30 degrees off prograde, cos");
+
+    int frames = 0;
+    double wmax = 0.0;
+    for (; frames < 900; frames++) {
+        nisp_vessel_substep(&v, &ctl, 0.0, 1.0 / 60.0);
+        double const w = mag3f(v.omega);
+        if (w > wmax) wmax = w;
+        if (nose_dot_prograde(&v) > 0.9999) { frames++; break; }
+    }
+    double const alpha = 45.0 / 3144.4849;  // kN*m over t*m^2 is rad/s^2
+
+    CHECK(frames < 900, "SAS gets a 137 t stack onto prograde");
+    CHECK_NEAR(frames, 629.0, 60.0, "frames it took, at 10.5 s");
+    CHECK_NEAR(nose_dot_prograde(&v), 1.0, 1e-3, "and it stays there");
+    CHECK_NEAR(wmax, 0.0862, 0.01, "the fastest it rotated, rad/s");
+
+    // F-36: the old spring/damper law overshot to 24 degrees and swung back
+    // forever, because its damping collapses on the way to the target while
+    // the ship is still rotating. A rate-commanded one never asks for a rate
+    // it cannot arrest, so the peak sits under the braking limit
+    // sqrt(2 * alpha * angle) -- the one number that decides whether a slew
+    // lands or overshoots -- and at sqrt(alpha * angle), which is what a
+    // full-authority-out-then-full-authority-back slew peaks at.
+    CHECK(wmax <= sqrt(2.0 * alpha * 0.523599), "it never rotates faster than it can stop");
+    CHECK_NEAR(wmax, sqrt(alpha * 0.523599), 0.01, "and it slews at the authority limit");
+}
+
+static void no_rcs_means_no_control(void) {
+    struct { int sas; int rcs; int design_rcs; char const* what; } rows[] = {
+        {NISP_SAS_PROGRADE, 0, 1, "SAS on, RCS switch off"},
+        {NISP_SAS_OFF, 1, 1, "RCS on, SAS off, keys alone"},
+        {NISP_SAS_PROGRADE, 1, 0, "SAS on, RCS never built"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_design_t const d = control_design(rows[i].design_rcs);
+        nisp_vessel_t v = attitude_vessel(&d, 30.0);
+        nisp_control_t ctl;
+        nisp_control_init(&ctl);
+        ctl.rcs = rows[i].rcs != 0;
+        ctl.sas = rows[i].sas;
+        ctl.throttle = 0.0f;
+        for (int f = 0; f < 1200; f++) nisp_vessel_substep(&v, &ctl, 0.0, 1.0 / 60.0);
+        CHECK_NEAR(mag3f(v.omega), 0.0, 1e-9, rows[i].what);
+        // The nose still drifts, but only because prograde itself turns as
+        // the ship orbits: 20 s of mean motion at 680 km.
+        CHECK_NEAR(nose_dot_prograde(&v), 0.864081, 1e-4, "and the ship never turns");
+    }
+}
+
+static void manual_keys(void) {
+    nisp_design_t const d = control_design(1), off = control_design(0);
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_OFF;
+    ctl.throttle = 0.0f;
+
+    // One axis at full deflection is one module's budget, and torque over
+    // inertia is rad/s^2 with no conversion at all (physics.h). Ten seconds
+    // of 15 kN*m on 3,144 t*m^2 is 0.048 rad/s, which is the number a
+    // player can feel: a launcher responds, but it takes a second to notice.
+    ctl.torque[0] = NISP_MANUAL_TORQUE_KNM;
+    nisp_vessel_t v = attitude_vessel(&d, 0.0);
+    double wmax = 0.0;
+    for (int f = 0; f < 600; f++) {
+        nisp_vessel_substep(&v, &ctl, 0.0, 1.0 / 60.0);
+        double const w = mag3f(v.omega);
+        if (w > wmax) wmax = w;
+    }
+    CHECK_NEAR(wmax, 10.0 * 15.0 / 3144.4849, 1e-3, "10 s of a full manual pull, rad/s");
+
+    ctl.torque[0] = 0.0f;
+    v = attitude_vessel(&off, 0.0);
+    v.omega[1] = 0.5f;  // a spin, because nothing else will stop it
+    for (int f = 0; f < 600; f++) nisp_vessel_substep(&v, &ctl, 0.0, 1.0 / 60.0);
+    CHECK_NEAR(mag3f(v.omega), 0.5, 1e-9, "a spin with no RCS keeps spinning");
+
+    // HOLD is the brake. It commands zero rate, so it is pure authority
+    // against the rotation, and the answer is the arithmetic a player can
+    // do in their head: 45 kN*m on 3,144 t*m^2 for ten seconds.
+    nisp_vessel_t held = attitude_vessel(&d, 0.0);
+    held.omega[1] = 0.5f;
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_HOLD;
+    for (int f = 0; f < 600; f++) nisp_vessel_substep(&held, &ctl, 0.0, 1.0 / 60.0);
+    CHECK_NEAR(mag3f(held.omega), 0.5 - 10.0 * 45.0 / 3144.4849, 1e-3, "10 s of SAS HOLD on a spin, rad/s");
+}
+
+static void case12_control_sas(void) {
+    printf("case 12  control authority, SAS, and the ship that has neither\n");
+    control_budget();
+    sas_aims_at_prograde();
+    sas_converges();
+    no_rcs_means_no_control();
+    manual_keys();
+}
+
+
+// =====================================================================
+// case 13 -- whole missions: a launch, an insertion, a landing, a reentry
+// ---------------------------------------------------------------------
+// Everything above this line is a number. This case is a flight, run
+// through the same mission loop game/ will run on a badge, against
+// outcomes a player would recognise: it got to space, it did not, it
+// landed, it burned up. The tolerances are wide on purpose -- these are
+// not arithmetic checks, they are "did the whole thing hang together", and
+// the exact numbers are here so a regression shows up as a diff instead of
+// as a mystery.
+// =====================================================================
+
+static nisp_design_t launcher_design(void) {
+    // A launcher that can actually reach orbit from the pad: 7,697 m/s,
+    // TWR 1.50, 61.2 t, seven rows. Built to be a bit over-powered,
+    // because a rocket that barely makes orbit is a rocket that never
+    // leaves the pad in a test.
+    nisp_design_t d;
+    memset(&d, 0, sizeof(d));
+    snprintf(d.name, sizeof(d.name), "%s", "TEST-LAUNCHER");
+    d.stage_count = 3;
+    d.stage[0].kind = NISP_KIND_UPPER;
+    d.stage[0].diameter = 0;
+    d.stage[0].length = 3;
+    d.stage[0].engine = NISP_ENGINE_RELION;
+    d.stage[0].engine_count = 1;
+    d.stage[0].rcs = true;
+    d.stage[1].kind = NISP_KIND_MAIN;
+    d.stage[1].diameter = 1;
+    d.stage[1].length = 7;
+    d.stage[1].engine = NISP_ENGINE_SKIPPER;
+    d.stage[1].engine_count = 1;
+    d.stage[1].rcs = true;
+    d.stage[2].kind = NISP_KIND_MAIN;
+    d.stage[2].diameter = 3;
+    d.stage[2].length = 15;
+    d.stage[2].engine = NISP_ENGINE_MAINSAIL;
+    d.stage[2].engine_count = 3;
+    d.stage[2].rcs = true;
+    nisp_design_clamp(&d);
+    return d;
+}
+
+static float live_propellant(nisp_stack_t const* s) {
+    float p = 0.0f;
+    for (int i = 0; i < s->count; i++) {
+        if (s->part[i].stage == s->live_stage) p += s->part[i].prop_t;
+    }
+    return p;
+}
+
+// The frame loop a player drives: read the HUD, decide, step. `auto_stage`
+// is the one piece of help the game gives away -- an empty stage is dropped
+// for you, because staging at the right moment is bookkeeping and not
+// flying (Part F1).
+static void fly_mission(nisp_mission_t* m, nisp_control_t* ctl, double t_end, float* peak_q,
+                        bool auto_stage) {
+    // Frames, not seconds: warp decides how much sim time a frame buys, so
+    // the loop is written in the mission's own clock (Part F1).
+    for (int f = 0; f < 20000 && m->t < t_end && m->state == NISP_MISSION_FLYING; f++) {
+        nisp_readout_t r;
+        nisp_mission_readout(m, &r);
+        if (peak_q != NULL && r.q_dyn_pa > *peak_q) *peak_q = r.q_dyn_pa;
+        if (auto_stage && live_propellant(&m->ship.stack) <= 1e-4f) ctl->stage = true;
+        if (ctl->sas == NISP_SAS_HOLD && (r.alt_km > 12.0f || r.speed_ms > 700.0f))
+            ctl->sas = NISP_SAS_PROGRADE;
+        nisp_mission_step(m, ctl, 1.0 / 60.0);
+        ctl->stage = false;
+    }
+}
+
+static void launch_reaches_space(void) {
+    nisp_design_t const d = launcher_design();
+    nisp_budget_t b;
+    nisp_budget_compute(&d, BODY_BOB, &b);
+    CHECK_NEAR(b.total_mass_t, 61.227, 0.01, "mass at the pad, t");
+    CHECK_NEAR(b.liftoff_twr, 1.499, 0.005, "liftoff TWR");
+    CHECK_NEAR(b.total_delta_v_ms, 7697.2, 5.0, "what it has to spend, m/s");
+    CHECK(b.reach_orbit_ok, "which is enough for orbit");
+
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_launch(&m, &d, BODY_BOB, 0.0);
+    CHECK(m.state == NISP_MISSION_FLYING, "the mission starts on the pad");
+    CHECK(m.ship.landed, "with the ground under it");
+
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_HOLD;  // hold the heading it was built with, then turn prograde
+    ctl.throttle = 1.0f;
+    ctl.warp = 5.0f;
+
+    float peak_q = 0.0f;
+    fly_mission(&m, &ctl, 150.0, &peak_q, true);
+    nisp_readout_t r;
+    nisp_mission_readout(&m, &r);
+
+    CHECK(m.state == NISP_MISSION_FLYING, "150 s in, still flying");
+    CHECK_NEAR(m.t, 150.0, 0.5, "simulated seconds it flew");
+    CHECK(r.alt_km > 40.0, "out of the dense air");
+    CHECK(r.speed_ms > 1000.0, "and fast");
+    CHECK(m.parts_lost == 0, "nothing burned through");
+    CHECK(m.max_heat < 0.5f, "the hottest part is under half its limit");
+    CHECK(peak_q > 4000.0f && peak_q < 7000.0f, "max-q on the way up, Pa");
+    CHECK(m.stages_dropped >= 1, "the empty booster was dropped");
+    CHECK(m.debris_count == 0, "and staging is not a failure: no debris");
+    CHECK(!nisp_mission_music_space(&m), "47 km up, it is still in the air");
+
+    fly_mission(&m, &ctl, 300.0, &peak_q, true);
+    nisp_mission_readout(&m, &r);
+    CHECK(m.state == NISP_MISSION_FLYING, "300 s in, still flying");
+    CHECK(r.alt_km > 100.0, "in space");
+    CHECK(nisp_mission_music_space(&m), "and the music knows it (Part N4)");
+}
+
+static void launch_without_rcs_falls_over(void) {
+    // D-47: this is the lesson, not a bug. A fat booster with no RCS has no
+    // control torque, so the air turns it, and a rocket flying sideways at
+    // 800 m/s does not survive it. Same rocket, same throttle, same SAS
+    // switch -- the only difference is whether the player paid for modules.
+    struct { int rcs; int sas; char const* what; } rows[] = {
+        {1, NISP_SAS_HOLD, "RCS off, SAS on"},
+        {1, NISP_SAS_OFF, "RCS off, SAS off"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_design_t d = launcher_design();
+        for (int k = 0; k < d.stage_count; k++) d.stage[k].rcs = false;
+        nisp_design_clamp(&d);
+
+        nisp_mission_t m;
+        nisp_mission_init(&m);
+        nisp_mission_launch(&m, &d, BODY_BOB, 0.0);
+        nisp_control_t ctl;
+        nisp_control_init(&ctl);
+        ctl.rcs = rows[i].rcs != 0;
+        ctl.sas = rows[i].sas;
+        ctl.throttle = 1.0f;
+        ctl.warp = 5.0f;
+        fly_mission(&m, &ctl, 3600.0, NULL, true);
+
+        CHECK_MSG(m.state == NISP_MISSION_WRECKED, rows[i].what);
+        CHECK(m.t < 120.0, "and it went early");
+        CHECK(m.parts_lost > 0, "parts went before the ground did");
+        CHECK(m.max_heat < 0.5f, "it was not the heat that got it");
+    }
+}
+
+
+static void circularise_at_apoapsis(void) {
+    // The one burn every player does first: 100 x 300 km, catch the
+    // apoapsis, and circularise. The map says 127.92 m/s (Part O4); the
+    // rocket spends it, and the orbit that comes out is the one the map
+    // promised.
+    nisp_design_t const d = flight_design("TEST-POD", NISP_KIND_UPPER, 0, 3, NISP_ENGINE_RELION, 1, true, 0);
+    nisp_vessel_t v = apside_vessel(BODY_BOB, 900.0, 700.0, &d);
+
+    nisp_state_t st;
+    nisp_elements_t el;
+    nisp_vessel_state(&v, &st);
+    nisp_state_to_elements(&st, BODY_BOB, 0.0, &el);
+    CHECK_NEAR(nisp_circularisation_delta_v(&el, 900.0f), 0.12792, 1e-3, "the burn the planner would ask for, km/s");
+
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_begin(&m, &v, 0.0);
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_PROGRADE;
+    ctl.throttle = 1.0f;
+    ctl.warp = 1.0f;
+
+    float const m0 = m.ship.stack.mass_t;
+    int frames = 0;
+    for (; frames < 900 && m.state == NISP_MISSION_FLYING; frames++) {
+        nisp_readout_t r;
+        nisp_mission_readout(&m, &r);
+        if (r.periapsis_km >= 299.0f) break;
+        nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    }
+    nisp_readout_t r;
+    nisp_mission_readout(&m, &r);
+
+    double const dv_used = 320.0 * 9.80665 * log((double)m0 / (double)r.mass_t);
+    CHECK(frames < 600, "the burn is over in under ten seconds");
+    CHECK_NEAR(dv_used, 127.92, 1.3, "delta-v it actually spent, m/s");
+    CHECK_NEAR(r.mass_t, 2.6412, 0.01, "mass it spent to do it, t");
+    CHECK_NEAR(r.apoapsis_km - r.periapsis_km, 0.0, 20.0, "how round the orbit came out, km");
+    CHECK_NEAR(r.periapsis_km, 299.3, 1.0, "periapsis altitude, km");
+    CHECK_NEAR(r.speed_ms, 1980.3, 5.0, "and it is the circular speed for it");
+    CHECK(m.state == NISP_MISSION_FLYING, "in one piece");
+}
+
+// A pod dropped from the sky: no engine, RCS, and whichever of a chute or
+// legs the design had. Everything here is Part F3's survivability rule --
+// 10 m/s and 10 degrees, or whatever the best deployed leg set allows.
+static void drop_pod(nisp_mission_t* m, double alt_m, double v_ms, int legs) {
+    nisp_design_t d;
+    memset(&d, 0, sizeof(d));
+    snprintf(d.name, sizeof(d.name), "%s", "TEST-DROP");
+    d.stage_count = 1;
+    d.stage[0].kind = NISP_KIND_CARGO;
+    d.stage[0].diameter = 0;
+    d.stage[0].length = 0;
+    d.stage[0].engine = NISP_ENGINE_NONE;
+    d.stage[0].rcs = true;
+    d.stage[0].legs = legs;
+    nisp_design_clamp(&d);
+
+    double p[3];
+    nisp_surface_point(BODY_BOB, 0.0, 0.0, 0.0, p);
+    p[0] += alt_m * NISP_KM_PER_M;  // straight up from the pad
+    nisp_state_t st;
+    for (int i = 0; i < 3; i++) {
+        st.r[i] = (float)p[i];
+        st.v[i] = 0.0f;
+    }
+    st.v[0] = (float)(-v_ms * NISP_KM_PER_M);  // falling back down the radial
+    float nose[3] = {1.0f, 0.0f, 0.0f};
+
+    nisp_vessel_t v;
+    nisp_vessel_orbit(&v, &d, BODY_BOB, &st, 0.0, nose);
+    nisp_mission_init(m);
+    nisp_mission_begin(m, &v, 0.0);
+}
+
+static void a_chute_lands_it(void) {
+    struct { double alt_m; double v_ms; int chute; int legs; int want_state; char const* what; } rows[] = {
+        {1500.0, 60.0, 1, 0, NISP_MISSION_LANDED, "a chute from 1,500 m"},
+        {5000.0, 60.0, 1, 0, NISP_MISSION_LANDED, "a chute from 5,000 m"},
+        {1500.0, 60.0, 0, 4, NISP_MISSION_WRECKED, "no chute, four legs, 1,500 m"},
+        {3000.0, 800.0, 1, 0, NISP_MISSION_WRECKED, "a chute asked for at 800 m/s"},
+    };
+
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_mission_t m;
+        drop_pod(&m, rows[i].alt_m, rows[i].v_ms, rows[i].legs);
+        nisp_control_t ctl;
+        nisp_control_init(&ctl);
+        ctl.rcs = true;
+        ctl.sas = NISP_SAS_HOLD;
+        ctl.warp = 10.0f;
+        ctl.chute = rows[i].chute != 0;
+        ctl.legs = rows[i].legs != 0;
+        for (int f = 0; f < 20000 && m.state == NISP_MISSION_FLYING; f++) {
+            nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+            ctl.chute = false;
+            ctl.legs = false;
+        }
+
+        CHECK_MSG(m.state == rows[i].want_state, rows[i].what);
+        if (rows[i].chute && rows[i].v_ms < 300.0) {
+            CHECK(m.ship.stack.parachute, "the canopy opened");
+            CHECK_NEAR(m.ship.impact_ms, 8.806, 0.05, "terminal speed under the canopy, m/s");
+            CHECK(m.ship.impact_ms < NISP_TOUCHDOWN_BELL_MS, "under the 10 m/s bell");
+            CHECK(m.ship.impact_tilt_deg < NISP_TOUCHDOWN_BELL_TILT_DEG, "and upright");
+            CHECK(m.parts_lost == 0, "nothing went");
+        }
+    }
+
+    // The refusal is the point of the last row: a chute at 800 m/s is a
+    // shredded chute, so the game says no rather than pretending (Part F1).
+    nisp_mission_t m;
+    drop_pod(&m, 3000.0, 800.0, 0);
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_HOLD;
+    ctl.warp = 10.0f;
+    ctl.chute = true;
+    for (int f = 0; f < 20000 && m.state == NISP_MISSION_FLYING; f++) {
+        nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+        ctl.chute = false;
+    }
+    CHECK(!m.ship.stack.parachute, "a chute asked for too fast never opens");
+    CHECK(m.state == NISP_MISSION_WRECKED, "and the pod arrives the hard way");
+}
+
+
+static void landing_on_cheese_needs_legs(void) {
+    // Cheese has no air, so there is no chute and no braking in it: a
+    // landing there is a controlled descent and a leg set, or it is a
+    // crater (Part V4's leg rows). Same approach, same speed, 11.0 m/s --
+    // over the 10 m/s bell, inside the 12 m/s four-leg rating.
+    nisp_design_t const d =
+        flight_design("TEST-MOON", NISP_KIND_MAIN, 2, 9, NISP_ENGINE_SKIPPER, 2, true, NISP_LEGS_4);
+    double const t = 1000.0;
+
+    for (int legs = NISP_LEGS_4; legs >= 0; legs -= 4) {
+        nisp_design_t dd = d;
+        dd.stage[0].legs = legs;
+        nisp_design_clamp(&dd);
+
+        double pos[3], up[3], north[3], east[3], gv[3];
+        nisp_surface_point(BODY_CHEESE, t, 0.0, 0.0, pos);
+        nisp_local_frame(BODY_CHEESE, pos, up, north, east);
+        for (int i = 0; i < 3; i++) pos[i] += up[i] * 0.020;  // 20 m up
+        nisp_surface_velocity(BODY_CHEESE, t, 0.0f, 0.0f, gv);
+
+        nisp_state_t st;
+        for (int i = 0; i < 3; i++) {
+            st.r[i] = (float)pos[i];
+            st.v[i] = (float)(gv[i] - up[i] * 0.00748);  // 7.48 m/s down, relative to the ground
+        }
+        float nose[3] = {(float)up[0], (float)up[1], (float)up[2]};
+
+        nisp_vessel_t v;
+        nisp_vessel_orbit(&v, &dd, BODY_CHEESE, &st, t, nose);
+        nisp_mission_t m;
+        nisp_mission_init(&m);
+        nisp_mission_begin(&m, &v, t);
+        nisp_control_t ctl;
+        nisp_control_init(&ctl);
+        ctl.rcs = true;
+        ctl.sas = NISP_SAS_HOLD;
+        ctl.warp = 10.0f;
+        ctl.legs = true;
+        for (int f = 0; f < 900 && m.state == NISP_MISSION_FLYING; f++) {
+            nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+            ctl.legs = false;
+        }
+
+        if (legs) {
+            CHECK(m.state == NISP_MISSION_LANDED, "legs, and it stands on Cheese");
+            CHECK_NEAR(m.ship.impact_ms, 11.007, 0.05, "touchdown speed, m/s");
+            CHECK(m.ship.impact_ms > NISP_TOUCHDOWN_BELL_MS, "too fast for bare legs");
+            CHECK(m.parts_lost == 0, "but the legs take it");
+            CHECK_NEAR(m.ship.lat_rad, 0.0, 1e-3, "where it says it is, lat");
+        } else {
+            CHECK(m.state == NISP_MISSION_WRECKED, "no legs, and it is a crater");
+            CHECK_NEAR(m.ship.impact_ms, 11.007, 0.05, "at the same speed");
+            CHECK(m.parts_lost > 0, "with parts left behind");
+        }
+    }
+}
+
+static void a_steep_deorbit_burns(void) {
+    // Part A6 with no mercy: 250 x 20 km is a reentry this capsule cannot
+    // survive nose-first, and the check is *which* part went. 250 x 60 km
+    // is the same rocket and the same entry, and it is still flying.
+    struct { float pe_km; int want_state; char const* what; } rows[] = {
+        {20.0f, NISP_MISSION_WRECKED, "250 x 20 km"},
+        {60.0f, NISP_MISSION_FLYING, "250 x 60 km"},
+    };
+    nisp_design_t const stack = three_stage_design();
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_vessel_t v = apside_vessel(BODY_BOB, 850.0, 600.0 + rows[i].pe_km, &stack);
+        nisp_mission_t m;
+        nisp_mission_init(&m);
+        nisp_mission_begin(&m, &v, 0.0);
+        nisp_control_t ctl;
+        nisp_control_init(&ctl);
+        ctl.rcs = true;
+        ctl.sas = NISP_SAS_PROGRADE;  // dart-first: the capsule leads, and eats the heat
+        ctl.warp = 100.0f;
+        for (int f = 0; f < 2000 && m.state == NISP_MISSION_FLYING; f++) nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+
+        nisp_readout_t r;
+        nisp_mission_readout(&m, &r);
+        CHECK_MSG(m.state == rows[i].want_state, rows[i].what);
+        if (rows[i].want_state == NISP_MISSION_WRECKED) {
+            CHECK(m.max_heat >= 1.0f, "the capsule reached its limit");
+            CHECK(m.ship.wreck_kind == NISP_KIND_CAPSULE, "and it was the capsule that went");
+            CHECK(m.parts_lost > 0, "with the rest of the stack still there");
+        } else {
+            CHECK(m.max_heat < 0.1f, "the shallower entry never got hot");
+            CHECK(m.parts_lost == 0, "and nothing went");
+        }
+    }
+}
+
+static void hovering_is_a_control_problem(void) {
+    // TWR 4 straight up from the pad, throttle pinned, 5 s. With a hold it
+    // climbs; without one the weathervane wins and it ends up on its back,
+    // which is what a hover is really a test of (Part A5).
+    nisp_design_t const d = flight_design("TEST-HOVER", NISP_KIND_MAIN, 2, 9, NISP_ENGINE_SKIPPER, 2, true, 0);
+    struct { int rcs; int sas; int want_state; char const* what; } rows[] = {
+        {1, NISP_SAS_HOLD, NISP_MISSION_FLYING, "RCS and a hold"},
+        {1, NISP_SAS_OFF, NISP_MISSION_WRECKED, "RCS, no hold"},
+        {0, NISP_SAS_HOLD, NISP_MISSION_WRECKED, "a hold with nothing to spend"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_design_t dd = d;
+        dd.stage[0].rcs = rows[i].rcs != 0;
+        nisp_design_clamp(&dd);
+
+        nisp_mission_t m;
+        nisp_mission_init(&m);
+        nisp_mission_launch(&m, &dd, BODY_BOB, 0.0);
+        nisp_control_t ctl;
+        nisp_control_init(&ctl);
+        ctl.rcs = rows[i].rcs != 0;
+        ctl.sas = rows[i].sas;
+        ctl.throttle = 1.0f;
+        ctl.warp = 10.0f;
+        for (int f = 0; f < 300 && m.state == NISP_MISSION_FLYING; f++) nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+
+        nisp_readout_t r;
+        nisp_mission_readout(&m, &r);
+        CHECK_MSG(m.state == rows[i].want_state, rows[i].what);
+        if (rows[i].want_state == NISP_MISSION_FLYING) {
+            CHECK(r.alt_km * 1000.0 > 1000.0, "it climbed");
+            CHECK(r.nose_up_dot > 0.99f, "nose up, the whole way");
+            CHECK_NEAR(r.twr, 3.98, 0.05, "TWR at ignition");
+        } else {
+            CHECK(r.nose_up_dot < 0.0f, "and the one without a hold ends pointing down");
+        }
+    }
+}
+
+static void case13_missions(void) {
+    printf("case 13  a launch, an insertion, a landing, and a reentry that is too steep\n");
+    launch_reaches_space();
+    launch_without_rcs_falls_over();
+    circularise_at_apoapsis();
+    a_chute_lands_it();
+    landing_on_cheese_needs_legs();
+    a_steep_deorbit_burns();
+    hovering_is_a_control_problem();
+}
+
 int main(void) {
     printf("nispcheck  --  Null Island Space Program, host harness\n\n");
 
@@ -1137,6 +2043,12 @@ int main(void) {
     case9_heat();
     printf("\n");
     case10_split();
+    printf("\n");
+    case11_coast_warp_soi();
+    printf("\n");
+    case12_control_sas();
+    printf("\n");
+    case13_missions();
     printf("\n");
 
     if (s_fail) {

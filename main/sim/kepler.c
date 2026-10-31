@@ -19,7 +19,19 @@
 //  H ~ asinh((M + e)/e). A flyby trajectory spends almost all of its
 //  simulated time near periapsis, where M is small and the seed is nearly
 //  exact, and the rest far away, where the asymptote is nearly exact.
+//
+//  asinh() itself is not in the graceloader export table (sinh, cosh, exp
+//  and log are), so it is built here out of log and sqrt. Mirroring
+//  through the odd symmetry keeps log(a + sqrt(a*a+1)) from cancelling
+//  away for negative arguments.
 // =====================================================================
+
+static double hyper_asinh(double x) {
+    if (x != x) return x;
+    double const a = x < 0.0 ? -x : x;
+    double const r = log(a + sqrt(a * a + 1.0));
+    return x < 0.0 ? -r : r;
+}
 
 double nisp_kepler_elliptic(double M, double e) {
     if (e < 0.0) e = 0.0;
@@ -46,7 +58,7 @@ double nisp_kepler_elliptic(double M, double e) {
 double nisp_kepler_hyperbolic(double M, double e) {
     if (e < 1.000001) e = 1.000001;
 
-    double H = asinh((M + e) / e);
+    double H = hyper_asinh((M + e) / e);
     for (int i = 0; i < 8; i++) {
         double const f  = e * sinh(H) - H - M;
         double const fp = e * cosh(H) - 1.0;
@@ -96,7 +108,7 @@ double nisp_time_at_true(nisp_elements_t const* el, double nu) {
         double denom = 1.0 + el->e * cos(nu);
         if (denom <= 1e-9) denom = 1e-9;  // past the asymptote: no such point
         double const sh = sqrt(el->e * el->e - 1.0) * sin(nu) / denom;
-        double const H = asinh(sh);
+        double const H = hyper_asinh(sh);
         M = el->e * sinh(H) - H;
     }
 
@@ -190,7 +202,10 @@ void nisp_elements_derive(nisp_elements_t* el) {
     if (fabs(el->e - 1.0) < 1e-6) el->e = (el->a >= 0.0) ? (1.0 - 1e-6) : (1.0 + 1e-6);
 
     el->p_km      = fabs(el->a) * fabs(1.0 - el->e * el->e);
-    el->periapsis_km = fabs(el->a) * (1.0 - el->e);
+    // Both branches measure periapsis the same way: |a| times the distance
+    // from the focus to the vertex. On a hyperbola a is negative and
+    // (1 - e) is negative, and the two signs cancel.
+    el->periapsis_km = fabs(el->a) * fabs(1.0 - el->e);
     if (el->e < 1.0) {
         el->apoapsis_km = el->a * (1.0 + el->e);
         el->period_s    = 2.0 * M_PI * sqrt(el->a * el->a * el->a / el->mu);
@@ -226,11 +241,20 @@ bool nisp_state_to_elements(nisp_state_t const* state, int body, double t, nisp_
     // e from the energy and the angular momentum. p = h^2/mu, so the
     // usual 1 + 2*eps*h^2/mu^2 is 1 + 2*eps*p/mu here -- one division,
     // and no chance of squaring the wrong quantity.
-    out->e    = sqrt(1.0 + 2.0 * energy * out->p_km / mu);
-    if (out->e < 0.0) out->e = 0.0;
+    // The argument is clamped before the square root, not the result after
+    // it (F-33). A circular orbit is the case: its 1 + 2*eps*p/mu is exactly
+    // zero in theory and -1e-15 in float, sqrt of that is NaN, and a NaN
+    // compares false against 0.0 -- so the guard that used to sit here never
+    // fired and the NaN propagated a whole flight instead.
+    double e2 = 1.0 + 2.0 * energy * out->p_km / mu;
+    if (!(e2 > 0.0)) e2 = 0.0;
+    out->e = sqrt(e2);
 
     // Inclination from +y, the reference normal.
-    double inc = acos(hy / h);
+    double sh = hy / h;
+    if (sh > 1.0) sh = 1.0;
+    if (sh < -1.0) sh = -1.0;
+    double inc = acos(sh);
     if (inc < 0.0) inc = 0.0;
     if (inc > M_PI) inc = M_PI;
     out->inc = inc;
@@ -293,7 +317,7 @@ bool nisp_state_to_elements(nisp_state_t const* state, int body, double t, nisp_
     } else {
         double const denom = 1.0 + out->e * cos(nu);
         double const sh = sqrt(out->e * out->e - 1.0) * sin(nu) / (denom > 1e-9 ? denom : 1e-9);
-        double const Hh = asinh(sh);
+        double const Hh = hyper_asinh(sh);
         out->m0 = out->e * sinh(Hh) - Hh;
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "Null Island Space Program",
-  "description": "Fly a ship to Null Island. To nowhere, and beyond!",
+  "description": "Build a rocket, fly it off Planet Bob, land on Cheese. To nowhere, and beyond!",
   "categories": ["games"],
   "version": "0.1.0",
   "icon": {
@@ -22,10 +22,10 @@
         {"source_file": "nullislandlogo_ball.png", "target_file": "nullislandlogo_ball.png"},
         {"source_file": "music/menu/brittle_rille.mp3", "target_file": "music/menu/brittle_rille.mp3"},
         {"source_file": "music/menu/brittle_rille.txt", "target_file": "music/menu/brittle_rille.txt"},
-        {"source_file": "music/impact_lento.mp3", "target_file": "music/impact_lento.mp3"},
-        {"source_file": "music/impact_lento.txt", "target_file": "music/impact_lento.txt"},
-        {"source_file": "music/sneaky_adventure.mp3", "target_file": "music/sneaky_adventure.mp3"},
-        {"source_file": "music/sneaky_adventure.txt", "target_file": "music/sneaky_adventure.txt"}
+        {"source_file": "music/impact_lento.mp3", "target_file": "music/space/impact_lento.mp3"},
+        {"source_file": "music/impact_lento.txt", "target_file": "music/space/impact_lento.txt"},
+        {"source_file": "music/sneaky_adventure.mp3", "target_file": "music/engineering/sneaky_adventure.mp3"},
+        {"source_file": "music/sneaky_adventure.txt", "target_file": "music/engineering/sneaky_adventure.txt"}
       ]
     }
   ]

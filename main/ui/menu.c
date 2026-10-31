@@ -9,8 +9,10 @@
 
 #include "audio/music.h"
 #include "common/rng.h"
+#include "engineering/sheet.h"
 #include "esp_timer.h"
 #include "game/input.h"
+#include "rocket/design.h"
 #include "se_audio.h"
 #include "se_config.h"
 #include "se_direct565.h"
@@ -26,7 +28,10 @@ typedef enum {
     SCR_NONE = 0,
     SCR_TITLE,     // the title bar: Play / Settings / Quit
     SCR_WORLDS,    // the slots
-    SCR_WORLD,     // one slot: Play / Rename / Delete
+    SCR_WORLD,     // one slot: the Spaceport hub (Part N1)
+    SCR_LAUNCH,    // which saved design leaves the pad
+    SCR_DESIGNS,   // the blueprints on the card
+    SCR_DESIGN,    // one blueprint: Engineering / Rename / Delete
     SCR_NEW,       // New world: name, seed, Create
     SCR_NAME,      // typing a name
     SCR_SEED,      // typing a seed
@@ -63,6 +68,9 @@ static screen_t parent_of(screen_t s) {
         case SCR_WORLDS: return SCR_TITLE;
         case SCR_WORLD: return SCR_WORLDS;
         case SCR_NEW: return SCR_WORLDS;
+        case SCR_LAUNCH:
+        case SCR_DESIGNS: return SCR_WORLD;
+        case SCR_DESIGN: return SCR_DESIGNS;
         case SCR_NAME:
         case SCR_SEED: return s_edit_return;
         case SCR_DELETE: return SCR_WORLD;
@@ -78,10 +86,32 @@ static screen_t parent_of(screen_t s) {
 // --- The world the screens are about --------------------------------------
 
 static int s_slot;      // the slot SCR_WORLD and SCR_DELETE are about
+static int s_open_slot = -1;  // the slot main.c has open, -1 when it has none
 static int s_new_slot;  // the slot SCR_NEW will write to
 static char s_new_name[NISP_NAME_MAX];
 static uint32_t s_new_seed;
-static bool s_edit_rename;  // the text being typed names a world that exists
+
+// The blueprints on the card, read once when a design screen opens -- the
+// same rule as the slots: a menu is not a place to re-read files per frame.
+#define MAX_DESIGNS 16
+static char s_designs[MAX_DESIGNS][NISP_DESIGN_NAME_MAX + 1];
+static int s_design_n;
+static int s_design_sel;
+
+// The blueprints, read off the card. Sorted already (nisp_design_list).
+static void refresh_designs(void) {
+    s_design_n = nisp_design_list(s_designs, MAX_DESIGNS);
+}
+// What the text being typed is for. Four different things want a name, and
+// only one of them is a world.
+typedef enum {
+    EDIT_NEW_WORLD = 0,  // the name a new slot will be created with
+    EDIT_RENAME_WORLD,   // a slot that exists
+    EDIT_RENAME_DESIGN,  // a blueprint that exists
+    EDIT_WORKING_NAME    // the design Engineering is drawing (a command back out)
+} edit_kind_t;
+static edit_kind_t s_edit_kind = EDIT_NEW_WORLD;
+static char s_edit_target[NISP_DESIGN_NAME_MAX + 1];  // what a rename is renaming
 
 // The text being typed. Wider than a name so there is room to type past
 // the limit and see it refused rather than watch characters vanish.
@@ -112,7 +142,7 @@ static char const* status_line(void) {
 
 // --- The menu the engine draws --------------------------------------------
 
-#define MAX_ROWS 24
+#define MAX_ROWS 32  // the controls screen is one row per action, plus a reset row
 static se_menu_row_t s_rows[MAX_ROWS];
 static se_menu_def_t s_def;
 static se_menu_t s_menu;
@@ -157,12 +187,96 @@ static int build_worlds(void) {
     return NISP_SAVE_SLOTS + 1;
 }
 
+// The Spaceport hub (Part N1). Verbs, never verbs-with-arguments (D-24):
+// the rows that need a parameter open a picker, so this screen is seven
+// rows long no matter how many blueprints the player has.
 static int build_world(void) {
     nisp_slot_t const* info = &s_slot_info[s_slot];
-    snprintf(s_title, sizeof(s_title), "Slot %d", s_slot + 1);
-    snprintf(s_subtitle, sizeof(s_subtitle), "%s", info->info);
+    refresh_designs();
+    snprintf(s_title, sizeof(s_title), "Spaceport  --  slot %d", s_slot + 1);
+    snprintf(s_subtitle, sizeof(s_subtitle), "%s  --  %d blueprint%s", info->info, s_design_n,
+             s_design_n == 1 ? "" : "s");
     begin(s_title, s_subtitle, "enter chooses   esc back");
-    s_rows[0] = (se_menu_row_t){.label = "Play", .kind = SE_MENU_VAL_NONE};
+    s_rows[0] = (se_menu_row_t){.label = "Continue mission", .kind = SE_MENU_VAL_NONE};
+    s_rows[1] = (se_menu_row_t){.label = "Build a rocket", .kind = SE_MENU_VAL_NONE};
+    s_rows[2] = (se_menu_row_t){.label = "Launch...", .kind = SE_MENU_VAL_NONE};
+    s_rows[3] = (se_menu_row_t){.label = "Designs...", .kind = SE_MENU_VAL_NONE};
+    s_rows[4] = (se_menu_row_t){.label = "Rename", .kind = SE_MENU_VAL_NONE};
+    s_rows[5] = (se_menu_row_t){.label = "Delete", .kind = SE_MENU_VAL_NONE};
+    s_rows[6] = (se_menu_row_t){.label = "Back", .kind = SE_MENU_VAL_NONE};
+    return 7;
+}
+
+// A row's value column is a little blueprint: the same sheet call the
+// Engineering screen uses, in a 34x34 box (Part B5). A design looks
+// identical here and on the drawing it was named after.
+static void draw_design_thumb(pax_buf_t* fb, float x, float y, float h, pax_col_t col, void* ctx) {
+    (void)col;
+    char const* const name = (char const*)ctx;
+    nisp_design_t design;
+    if (name == NULL || !nisp_design_load(name, &design)) return;
+
+    int const box = 34;
+    int const bx = (int)x, by = (int)(y + (40.0f - (float)box) * 0.5f);
+    nisp_rect_t const r = {bx, by, box, box};
+
+    uint16_t* const px = (uint16_t*)pax_buf_get_pixels(fb);
+    uint16_t const paper = direct_565_pack_for(fb, NISP_BLUEPRINT_ARGB);
+    for (int i = 0; i < box; i++) direct_565_vrun(px, bx + i, by, by + box - 1, paper);
+    uint16_t const edge = direct_565_pack_for(fb, NISP_PENCIL_DIM_ARGB);
+    direct_565_line(px, bx, by, bx + box - 1, by, edge);
+    direct_565_line(px, bx, by + box - 1, bx + box - 1, by + box - 1, edge);
+    direct_565_line(px, bx, by, bx, by + box - 1, edge);
+    direct_565_line(px, bx + box - 1, by, bx + box - 1, by + box - 1, edge);
+
+    nisp_sheet_thumb(fb, r, &design);
+}
+
+// Which design leaves the pad. One row per blueprint, each with its
+// thumbnail, plus a way out. An empty list says so rather than showing a
+// panel with nothing in it.
+static int build_launch(void) {
+    refresh_designs();
+    snprintf(s_title, sizeof(s_title), "Launch");
+    snprintf(s_subtitle, sizeof(s_subtitle), "Which blueprint leaves the pad?");
+    begin(s_title, s_subtitle, "enter launches   esc back");
+    if (s_design_n == 0) {
+        s_rows[0] = (se_menu_row_t){.label = "Nothing built yet", .kind = SE_MENU_VAL_NONE};
+        return 1;
+    }
+    for (int i = 0; i < s_design_n; i++) {
+        s_rows[i] = (se_menu_row_t){.label = s_designs[i], .kind = SE_MENU_VAL_CUSTOM,
+                                    .draw_value = draw_design_thumb, .ctx = s_designs[i]};
+    }
+    s_rows[s_design_n] = (se_menu_row_t){.label = "Back", .kind = SE_MENU_VAL_NONE};
+    s_def.visible_rows = 6;  // six 40 px rows is what the panel has room for
+    return s_design_n + 1;
+}
+
+static int build_designs(void) {
+    refresh_designs();
+    snprintf(s_title, sizeof(s_title), "Designs");
+    snprintf(s_subtitle, sizeof(s_subtitle), "Blueprints are shared between slots (Part N3).");
+    begin(s_title, s_subtitle, "enter opens   esc back");
+    if (s_design_n == 0) {
+        s_rows[0] = (se_menu_row_t){.label = "Nothing built yet", .kind = SE_MENU_VAL_NONE};
+        return 1;
+    }
+    for (int i = 0; i < s_design_n; i++) {
+        s_rows[i] = (se_menu_row_t){.label = s_designs[i], .kind = SE_MENU_VAL_CUSTOM,
+                                    .draw_value = draw_design_thumb, .ctx = s_designs[i]};
+    }
+    s_rows[s_design_n] = (se_menu_row_t){.label = "Back", .kind = SE_MENU_VAL_NONE};
+    s_def.visible_rows = 6;
+    return s_design_n + 1;
+}
+
+static int build_design(void) {
+    snprintf(s_title, sizeof(s_title), "%s",
+             (s_design_sel >= 0 && s_design_sel < s_design_n) ? s_designs[s_design_sel] : "Design");
+    snprintf(s_subtitle, sizeof(s_subtitle), "Open it in Engineering, rename it, or delete it.");
+    begin(s_title, s_subtitle, "enter chooses   esc back");
+    s_rows[0] = (se_menu_row_t){.label = "Open in Engineering", .kind = SE_MENU_VAL_NONE};
     s_rows[1] = (se_menu_row_t){.label = "Rename", .kind = SE_MENU_VAL_NONE};
     s_rows[2] = (se_menu_row_t){.label = "Delete", .kind = SE_MENU_VAL_NONE};
     s_rows[3] = (se_menu_row_t){.label = "Back", .kind = SE_MENU_VAL_NONE};
@@ -185,7 +299,19 @@ static int build_new(void) {
 // draw_edit() below, and every key is either a character or one of
 // enter / esc / bksp.
 static int build_name(void) {
-    begin("Name", NULL, "type   enter accepts   esc cancels   bksp erases");
+    // The same panel types four different things; only the title says which.
+    char const* title   = "Name";
+    char const* subtitle = NULL;
+    if (s_edit_kind == EDIT_RENAME_DESIGN) {
+        title    = "Blueprint name";
+        subtitle = s_edit_target;
+    } else if (s_edit_kind == EDIT_WORKING_NAME) {
+        title    = "Blueprint name";
+        subtitle = "Engineering saves it under this (Part B6).";
+    } else if (s_edit_kind == EDIT_RENAME_WORLD) {
+        title = "World name";
+    }
+    begin(title, subtitle, "type   enter accepts   esc cancels   bksp erases");
     return 0;
 }
 
@@ -323,6 +449,9 @@ static int build_rows(screen_t s) {
         case SCR_TITLE: return 0;  // a bar along the bottom, not a list
         case SCR_WORLDS: return build_worlds();
         case SCR_WORLD: return build_world();
+        case SCR_LAUNCH: return build_launch();
+        case SCR_DESIGNS: return build_designs();
+        case SCR_DESIGN: return build_design();
         case SCR_NEW: return build_new();
         case SCR_NAME: return build_name();
         case SCR_SEED: return build_seed();
@@ -378,10 +507,11 @@ static void open_new(int slot) {
     go(SCR_NEW);
 }
 
-static void open_edit(screen_t scr, screen_t back_to, bool rename, char const* initial) {
+static void open_edit(screen_t scr, screen_t back_to, edit_kind_t kind, char const* initial) {
     snprintf(s_edit, sizeof(s_edit), "%s", initial != NULL ? initial : "");
     s_edit_return = back_to;
-    s_edit_rename = rename;
+    s_edit_kind = kind;
+    snprintf(s_edit_target, sizeof(s_edit_target), "%s", initial != NULL ? initial : "");
     go(scr);
 }
 
@@ -447,15 +577,31 @@ static void edit_erase(void) {
     s_edit[len - 1] = '\0';
 }
 
-static void edit_commit(void) {
+static void edit_commit(menu_cmd_t* cmd) {
     if (s_scr == SCR_SEED) {
         if (s_edit[0] != '\0') s_new_seed = (uint32_t)strtoul(s_edit, NULL, 10);
-    } else if (s_edit_rename) {
+    } else if (s_edit_kind == EDIT_RENAME_WORLD) {
         if (s_edit[0] != '\0' && save_rename(s_slot, s_edit)) {
             menu_status_set("Renamed");
             refresh_slots();
         } else {
             menu_status_set(s_edit[0] != '\0' ? "Could not rename" : "A world needs a name");
+        }
+    } else if (s_edit_kind == EDIT_RENAME_DESIGN) {
+        if (s_edit[0] != '\0' && nisp_design_name_ok(s_edit) && nisp_design_rename(s_edit_target, s_edit)) {
+            menu_status_set("Renamed");
+            refresh_designs();
+        } else {
+            menu_status_set(s_edit[0] != '\0' ? "Could not rename" : "A blueprint needs a name");
+        }
+    } else if (s_edit_kind == EDIT_WORKING_NAME) {
+        // Engineering owns the working design; the name comes back to main.c
+        // as a command rather than being written to a file here (D-11).
+        if (s_edit[0] != '\0' && nisp_design_name_ok(s_edit)) {
+            cmd->kind = MENU_CMD_NAME;
+            snprintf(cmd->name, sizeof(cmd->name), "%.*s", (int)sizeof(cmd->name) - 1, s_edit);
+        } else {
+            menu_status_set("Letters, digits, space, dash, underscore");
         }
     } else {
         // The width is spelled out because it is the point: a name is
@@ -573,9 +719,11 @@ static void activate(menu_cmd_t* cmd) {
         case SCR_WORLDS:
             if (row < NISP_SAVE_SLOTS) {
                 if (s_slot_info[row].exists) {
-                    s_slot = row;
-                    s_cursor[SCR_WORLD] = 0;
-                    go(SCR_WORLD);
+                    // Opening a world is main.c's business: the save is read,
+                    // the island is built from its seed, and the hub opens on
+                    // top of it (plan 4.7).
+                    cmd->kind = MENU_CMD_PLAY;
+                    cmd->slot = row;
                 } else {
                     open_new(row);
                 }
@@ -586,11 +734,22 @@ static void activate(menu_cmd_t* cmd) {
 
         case SCR_WORLD:
             if (row == 0) {
-                cmd->kind = MENU_CMD_PLAY;
-                cmd->slot = s_slot;
+                // "Continue mission" is a verb with an argument the hub cannot
+                // see: which mission is main.c's business, and if there is
+                // none it says so rather than pretending.
+                cmd->kind = MENU_CMD_RESUME;
             } else if (row == 1) {
-                open_edit(SCR_NAME, SCR_WORLD, true, s_slot_info[s_slot].name);
+                cmd->kind = MENU_CMD_BUILD;
+                cmd->slot = s_slot;
             } else if (row == 2) {
+                s_cursor[SCR_LAUNCH] = 0;
+                go(SCR_LAUNCH);
+            } else if (row == 3) {
+                s_cursor[SCR_DESIGNS] = 0;
+                go(SCR_DESIGNS);
+            } else if (row == 4) {
+                open_edit(SCR_NAME, SCR_WORLD, EDIT_RENAME_WORLD, s_slot_info[s_slot].name);
+            } else if (row == 5) {
                 s_cursor[SCR_DELETE] = 1;  // "Keep it" is the safe thing to land on
                 go(SCR_DELETE);
             } else {
@@ -598,12 +757,60 @@ static void activate(menu_cmd_t* cmd) {
             }
             break;
 
+        case SCR_LAUNCH:
+            if (s_design_n == 0) {
+                go(SCR_WORLD);
+            } else if (row < s_design_n) {
+                cmd->kind = MENU_CMD_LAUNCH;
+                cmd->slot = s_slot;
+                snprintf(cmd->name, sizeof(cmd->name), "%s", s_designs[row]);
+            } else {
+                go_back(cmd);
+            }
+            break;
+
+        case SCR_DESIGNS:
+            if (s_design_n == 0) {
+                go(SCR_WORLD);
+            } else if (row < s_design_n) {
+                s_design_sel = row;
+                s_cursor[SCR_DESIGN] = 0;
+                go(SCR_DESIGN);
+            } else {
+                go_back(cmd);
+            }
+            break;
+
+        case SCR_DESIGN:
+            if (s_design_sel < 0 || s_design_sel >= s_design_n) {
+                go(SCR_DESIGNS);
+                break;
+            }
+            if (row == 0) {
+                cmd->kind = MENU_CMD_ENGINEERING;
+                cmd->slot = s_slot;
+                snprintf(cmd->name, sizeof(cmd->name), "%s", s_designs[s_design_sel]);
+            } else if (row == 1) {
+                open_edit(SCR_NAME, SCR_DESIGN, EDIT_RENAME_DESIGN, s_designs[s_design_sel]);
+            } else if (row == 2) {
+                if (nisp_design_delete(s_designs[s_design_sel])) {
+                    menu_status_set("Deleted");
+                    refresh_designs();
+                } else {
+                    menu_status_set("Could not delete");
+                }
+                go(SCR_DESIGNS);
+            } else {
+                go_back(cmd);
+            }
+            break;
+
         case SCR_NEW:
             if (row == 0) {
-                open_edit(SCR_NAME, SCR_NEW, false, s_new_name);
+                open_edit(SCR_NAME, SCR_NEW, EDIT_NEW_WORLD, s_new_name);
             } else if (row == 1) {
                 snprintf(s_edit, sizeof(s_edit), "%u", (unsigned)s_new_seed);
-                open_edit(SCR_SEED, SCR_NEW, false, s_seed_text);
+                open_edit(SCR_SEED, SCR_NEW, EDIT_NEW_WORLD, s_seed_text);
             } else if (row == 2) {
                 s_new_seed = fresh_seed();
                 menu_status_set("A new seed");
@@ -624,6 +831,9 @@ static void activate(menu_cmd_t* cmd) {
                 refresh_slots();
                 menu_status_set(ok ? "Deleted" : "Could not delete");
                 go(SCR_WORLDS);
+                // Deleting the world that is open leaves main.c flying a
+                // mission in a save that no longer exists.
+                if (ok && s_slot == s_open_slot) cmd->kind = MENU_CMD_CLOSE_WORLD;
             } else {
                 go(SCR_WORLD);
             }
@@ -734,7 +944,7 @@ menu_cmd_t menu_update(void) {
         for (int i = 0; i < s_typed_n; i++) edit_char(s_typed[i]);
         if (s_pending & ACT_BKSP) edit_erase();
         s_pending &= ~ACT_BKSP;
-        if (s_pending & ACT_OK) edit_commit();
+        if (s_pending & ACT_OK) edit_commit(&cmd);
         else if (s_pending & ACT_BACK) go(s_edit_return);  // discard
         s_pending = 0;
         s_typed_n = 0;
@@ -837,10 +1047,29 @@ void menu_draw(pax_buf_t* fb) {
 // --- Opening, closing, and the test kit's shortcuts -----------------------
 
 void menu_open_title(void) {
+    s_open_slot = -1;
     refresh_slots();
     s_cursor[SCR_TITLE] = 0;
     s_settings_back = SCR_TITLE;
     go(SCR_TITLE);
+}
+
+// main.c: opening a slot opens its Spaceport, not a mission (plan 4.7).
+void menu_open_spaceport(int slot) {
+    s_slot = slot;
+    s_open_slot = slot;
+    refresh_slots();
+    refresh_designs();
+    s_cursor[SCR_WORLD] = 0;
+    go(SCR_WORLD);
+}
+
+// The name Engineering is about to save under. The editor is modal over the
+// drawing rather than a screen in the tree: its "back" screen is SCR_NONE,
+// so accepting or cancelling hands the keyboard back to the sheet and main.c
+// takes the name out of the command (D-11).
+void menu_open_working_name(char const* initial) {
+    open_edit(SCR_NAME, SCR_NONE, EDIT_WORKING_NAME, initial);
 }
 
 void menu_open_pause(void) {
@@ -879,9 +1108,23 @@ bool menu_show(char const* name) {
         go(SCR_TITLE);
     } else if (!strcmp(name, "worlds")) {
         go(SCR_WORLDS);
-    } else if (!strcmp(name, "world")) {
+    } else if (!strcmp(name, "world") || !strcmp(name, "spaceport")) {
         s_slot = 0;
+        refresh_designs();
         go(SCR_WORLD);
+    } else if (!strcmp(name, "launch")) {
+        s_slot = 0;
+        refresh_designs();
+        go(SCR_LAUNCH);
+    } else if (!strcmp(name, "designs")) {
+        s_slot = 0;
+        refresh_designs();
+        go(SCR_DESIGNS);
+    } else if (!strcmp(name, "design")) {
+        s_slot = 0;
+        refresh_designs();
+        s_design_sel = 0;
+        go(SCR_DESIGN);
     } else if (!strcmp(name, "new")) {
         open_new(first_empty_slot());
     } else if (!strcmp(name, "delete")) {

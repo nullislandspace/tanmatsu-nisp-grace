@@ -2,19 +2,35 @@
 // =====================================================================
 //  Null Island Space Program  --  the music
 // ---------------------------------------------------------------------
-//  The menu plays a real recording: `music/menu/` beside app.so on the
-//  card, looped. That is what the engine's MP3 source is for
-//  (se_mp3.h), and it is a `music_source_t` like the procedural
+//  Every part of the game that has music plays a real recording off the
+//  card: `music/menu/`, `music/engineering/` and `music/space/`, each
+//  beside app.so, each looped. That is what the engine's MP3 source is
+//  for (se_mp3.h), and it is a `music_source_t` like the procedural
 //  generator, so swapping one for the other is one call and nothing in
 //  the mixer or the settings changes.
 //
 //  WHY A DIRECTORY AND NOT A FILE. se_mp3 plays every .mp3 in the
 //  directory it is handed -- there is no "play this one file" -- so a
 //  track that belongs to one place lives in a directory of its own.
-//  `music/menu/` is the menu's playlist; the rest of the shipped music
-//  sits in `music/` until something wants it, and a player can drop
-//  their own .mp3 into either. The Makefile puts them there
-//  (`make install`) and metadata.json lists them for a card install.
+//  `music/menu/` is the menu's playlist, `music/engineering/` the
+//  blueprint sheet's, `music/space/` the vacuum's; the rest of the
+//  shipped music sits in `music/` as a pool a player can add to, and a
+//  context whose own directory is missing falls back through it. The
+//  Makefile puts them there (`make install`) and metadata.json lists
+//  them for a card install.
+//
+//  ONE SOURCE, NEVER THREE. The mixer frees whatever it was given when
+//  it is handed a new one (se_audio.h), and an MP3 decoder is a task
+//  with a ring buffer behind it, so a context switch builds the next
+//  source at the moment the previous one is gone rather than keeping one
+//  per context waiting to be installed. That is also why the switch is a
+//  fade through silence rather than a swap: the fade is what makes the
+//  gap free rather than audible.
+//
+//  ATMOSPHERIC FLIGHT HAS NO MUSIC (the user's rule, plan 5.8). MUSIC_NONE
+//  is a context like the others, and it is the one that leaves the mixer
+//  with nothing: the air has its own noise, and a tune over it would be
+//  a lie about where the ship is.
 //
 //  THE PROCEDURAL GENERATOR IS THE FALLBACK, not the alternative. A
 //  card without the music -- a bad install, a card that predates it --
@@ -34,9 +50,34 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-// Pick a source and hand it to the mixer: the shipped MP3 playlist if the
-// card has one, the procedural generator otherwise. Called once at boot,
-// after the mixer exists. True if there is music at all.
+// The part of the game that wants music. MUSIC_MENU is what the title and
+// every menu screen play; MUSIC_ENGINEERING the blueprint sheet; MUSIC_SPACE
+// a ship above the atmosphere. MUSIC_NONE is the air: nothing plays.
+typedef enum {
+    MUSIC_NONE = 0,
+    MUSIC_MENU,
+    MUSIC_ENGINEERING,
+    MUSIC_SPACE,
+    MUSIC_CONTEXT_COUNT
+} music_ctx_t;
+
+// Ask for a context. Nothing audible happens in this call: it records the
+// request, and music_update() crossfades to it over the next frames. Safe
+// to call every frame with the same value.
+void music_set_context(int ctx);
+int  music_context(void);  // what was asked for
+
+// The context's word, for a log line or a menu ("menu", "space").
+char const* music_context_name(int ctx);
+
+// Advance the fade. Once a frame, from the show clock, after whatever
+// decided the context. It also re-applies the volume the Audio menu sets,
+// so a volume change is heard without any menu having to know this module
+// exists.
+void music_update(float dt);
+
+// Build the boot-time source and hand it to the mixer. Called once, after
+// the mixer exists, in the menu context. True if there is music at all.
 bool music_init(void);
 
 // True when the music is a recording off the card rather than the

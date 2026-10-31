@@ -41,6 +41,24 @@
 
 // --- The ladders (Part V2) ---------------------------------------------
 
+// The capsule's integrated parachute (Part A3): drag area in m^2, and the
+// dynamic pressure in Pa below which it is not worth deploying -- a chute
+// streamed in vacuum does nothing, and the key should say so.
+//
+// The 300 m^2 is sized backwards from the number it has to produce, not
+// forwards from a canopy drawing (F-29): Part A3's soft touchdown is 10 m/s,
+// and a chute has to actually deliver it. 300 m^2 of drag area -- a 20 m
+// canopy, which is what a real capsule drags -- gives a 1.0 t pod 7.3 m/s at
+// sea level and a 5.0 t fragment 16 m/s, which is why a heavy fragment needs
+// legs or a retro burn instead of a key press.
+//
+// The upper gate is the same rule from the other side: a chute that opens at
+// 800 m/s is a wreck either way, and it is also the one thing in this model
+// whose drag is stiffer than the physics tick (Part F1, F-30).
+#define NISP_CHUTE_CDA_M2 300.0f
+#define NISP_CHUTE_MIN_Q  40.0f
+#define NISP_CHUTE_MAX_V_MS 300.0f
+
 #define NISP_DIAMETER_COUNT 4
 #define NISP_LENGTH_STEP_M 0.625f
 #define NISP_LENGTH_MAX_STEPS 16  // 0.625 m .. 10 m

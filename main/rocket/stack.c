@@ -95,6 +95,7 @@ void nisp_stack_build(nisp_design_t const* d, nisp_stack_t* out) {
 
         nisp_stage_mass_t mass;
         nisp_stage_masses(st, &mass);
+        out->rcs[i] = st->rcs;
 
         // The separator above this stage (D-21). It goes with the stage.
         nisp_part_t sep = {0};
@@ -242,6 +243,7 @@ void nisp_stack_recompute(nisp_stack_t* s) {
     float mass = 0.0f, prop = 0.0f, com = 0.0f;
     float thrust = 0.0f, cot = 0.0f, isp = 0.0f;
     float cd_a = 0.0f, cp = 0.0f;
+    float cd_a_x2 = 0.0f;  // sum of cd_a * x^2, for the damping sum below
     bool capsule = false;
 
     for (int i = 0; i < s->count; i++) {
@@ -253,8 +255,18 @@ void nisp_stack_recompute(nisp_stack_t* s) {
         com += p->mass_t * x;
         if (p->kind == NISP_KIND_CAPSULE) capsule = true;
 
+        float const xc = 0.5f * (p->x0 + p->x1);
         cd_a += p->cd_a;
-        cp += p->cd_a * 0.5f * (p->x0 + p->x1);
+        cp += p->cd_a * xc;
+        cd_a_x2 += p->cd_a * xc * xc;
+
+        if (p->kind == NISP_KIND_CAPSULE && s->parachute) {
+            // The canopy streams off the capsule's aft end, so its drag
+            // centre is aft of the body it pulls on (Part A3).
+            cd_a += NISP_CHUTE_CDA_M2;
+            cp += NISP_CHUTE_CDA_M2 * p->x1;
+            cd_a_x2 += NISP_CHUTE_CDA_M2 * p->x1 * p->x1;
+        }
 
         if (p->igniting && p->engine != NISP_ENGINE_NONE) {
             nisp_engine_row_t const* e = nisp_engine_row(p->engine);
@@ -271,6 +283,10 @@ void nisp_stack_recompute(nisp_stack_t* s) {
     s->cd_a_total = cd_a;
     s->cp_x = cd_a > 0.0f ? cp / cd_a : s->com_x;
     s->static_margin_m = s->cp_x - s->com_x;
+    // Sum cd_a*(x - com)^2 = sum cd_a*x^2 - CdA * com^2, which is the same
+    // number without a second pass over the parts.
+    s->aero_damp_m4 = cd_a_x2 - cd_a * s->com_x * s->com_x;
+    if (s->aero_damp_m4 < 0.0f) s->aero_damp_m4 = 0.0f;
     s->thrust_kn = thrust * clamp01(s->throttle);
     s->cot_x = thrust > 0.0f ? cot / thrust : s->com_x;
     s->isp_s = thrust > 0.0f ? isp / thrust : 0.0f;
@@ -290,6 +306,24 @@ void nisp_stack_recompute(nisp_stack_t* s) {
         inertia += own + p->mass_t * d * d;
     }
     s->inertia_t_m2 = inertia;
+
+    // About the stack axis: every part is a solid cylinder of its own
+    // diameter, and nothing in this model is offset laterally from the
+    // axis. Roll control (Part F2) fights this number, not the transverse
+    // one, and it is one to two orders of magnitude smaller.
+    float axial = 0.0f;
+    for (int i = 0; i < s->count; i++) {
+        nisp_part_t const* p = &s->part[i];
+        float const r = 0.5f * p->diameter_m;
+        axial += 0.5f * p->mass_t * r * r;
+    }
+    s->inertia_axial_t_m2 = axial;
+}
+
+void nisp_stack_deploy_chute(nisp_stack_t* s, bool deployed) {
+    if (s == NULL || !s->has_capsule) return;
+    s->parachute = deployed;
+    nisp_stack_recompute(s);
 }
 
 // --- Burning -----------------------------------------------------------

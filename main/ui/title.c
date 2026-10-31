@@ -12,36 +12,6 @@
 #include "se_text.h"
 #include "ui/logo.h"
 
-static float const TAU = 6.2831853071795865f;
-
-// The orbit: slow enough to read the island, wide enough that the obelisk
-// never leaves the frame, low enough that the ground fills the bottom of
-// it. One revolution a little under two minutes.
-#define ORBIT_R      34.0f
-#define ORBIT_H       9.0f
-#define ORBIT_BOB     2.0f
-#define ORBIT_RATE  (TAU / 110.0)
-
-void title_pose(double t, nisp_pose_t* out) {
-    if (out == NULL) return;
-    float const a = (float)t * ORBIT_RATE;
-    float const r = ORBIT_R;
-    float const h = ORBIT_H + ORBIT_BOB * sinf(a * 0.5f);
-
-    out->x = cosf(a) * r;
-    out->y = h;
-    out->z = sinf(a) * r;
-
-    // Looking at the origin. The engine's forward is
-    // (sin yaw cos pitch, -sin pitch, cos yaw cos pitch) (se_scene.c), so
-    // the yaw that points the horizontal part at (-cos a, -sin a) is
-    // atan2 of those, and the pitch that drops the line of sight by the
-    // camera's own height is atan(h / r) -- positive, because positive
-    // pitch looks DOWN.
-    out->yaw = atan2f(-cosf(a), -sinf(a));
-    out->pitch = atan2f(h, r);
-}
-
 static void word(pax_buf_t* fb, uint32_t col, float h, float x, float y, char const* s) {
     rendertext_draw(fb, 0xff000000u, NULL, h, x + 2.0f, y + 2.0f, s);
     rendertext_draw(fb, col, NULL, h, x, y, s);

@@ -1417,6 +1417,25 @@ answer next to it:
     fragments whose masses sum to the original minus the lost part, whose CoM
     and CoT match hand arithmetic, and of which exactly one contains the
     capsule.
+11. **Coast, warp and the handover**: an analytic coast against an RK4 reference
+    at three altitudes, a warp ladder that advances exactly the seconds it
+    claims, the refusals (periapsis in the air, periapsis underground), the
+    per-frame substep cap, and Bob -> Cheese -> Bob with the state handed over
+    in the right velocity frame.
+12. **Authority and SAS**: the kN m a stack can actually spend, what it drops to
+    after a stage and on the pod alone, a 30 degree error spent at exactly the
+    limit, a hold that converges and then holds, and the three ways a ship can
+    have no authority at all (RCS switch off, keys only, RCS never built).
+13. **Missions**: a scripted launch to space, the same launch without RCS falling
+    over, circularising at apoapsis to within 1.3 km of round, a chute landing
+    at 8.8 m/s, a Cheese landing that survives on legs and is a crater without
+    them, a 250 x 20 km reentry that kills the capsule and a 250 x 60 km one
+    that never gets hot, and a hover that is really a control test.
+
+Cases 1-6 and 9-13 are in `tools/nispcheck.c` today (383 checks). Cases 7 and 8
+are written down before they exist, because they are the acceptance test for the
+planner in block 8 -- the planner gets written when its test is already
+described.
 
 ### The three harnesses, and what each one may be believed about
 
@@ -1430,11 +1449,12 @@ The middle row is new (F-17, D-39) and it is the one most of blocks 4, 6,
 7 and 9 will actually be iterated in: the same `app.so`, the same install
 path, the same `@@SR-*@@` records, no badge in reach.
 
-The starting reference set, from two identical runs of the manifest on
-2026-10-31, each in its own launch and each after a fresh build of `app.so`:
-`settings` `d858e651`, `graphics` `f1b873c0`, `audio` `3a203dad`, `display`
-`49b7b2f1` -- reproduced exactly, both times. The title is not in the set and
-cannot be until step 10.5 (F-19).
+The reference set, from the manifest run of 2026-11-01 (the 2026-10-31 set was
+superseded by the Spaceport hub, which moves the menu tree): `engineering`
+`51270ab0` (the same hash at t = 0 and t = 1.5 s, i.e. the sheet is a still
+drawing), `spaceport` `ce74b7e9`, `designs` `9346e1a9`, `settings` `011bbebf`,
+`graphics` `5900eaf1`, `audio` `a5a2facf`, `display` `ea95f026`. The title is
+not in the set and cannot be until step 10.5 (F-19).
 
 ---
 
@@ -1476,12 +1496,12 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 1.4 | `nispcheck` cases 1-4: the four KSP anchors, the 10,000-period round trip, the patched-conic transfer against a brute-force integrated reference, the Hohmann numbers | done | 2026-10-31, 79 checks. 80 km circular 2,278.6 m/s / 1,875.1 s; stationary 2,863 km; surface escape 3,430.5 m/s; Hohmann 860.2 m/s out, 7.947 h, 359.9 m/s; pad -> 100 km 2,605.4 m/s. The transfer case burns at a searched window (F-22) and agrees with a 0.01 s RK4 to 1.1 m. |
 | | **Accept:** every case in Part H 1-4 passes, with the tolerances printed | done | 2026-10-31: `nispcheck: ok (79 checks)`, every tolerance printed next to the number it allows. |
 | **2** | **The sky, on the badge** (replaces the island) | | |
-| 2.1 | `game/scene.c` rewritten: bodies as lit spheres, camera-relative submission in metres (D-16), LOD ladder 96x48 -> 12x6 by projected radius | todo | A full-disc Bob at the top LOD is over `SE_SCENE_TRI_CAP`; the ladder is what keeps it under, and step 2.4 measures where the ladder has to start. |
-| 2.2 | The sun as a direction: `normalize(Frodo - camera)` fed to the engine's directional light every frame | todo | The engine has no point lights and needs none here -- from near Bob, Frodo's direction is the same to within a fraction of a degree across the whole scene. |
-| 2.3 | Starfield kept; the title screen becomes the ship drifting past Bob with Cheese in the frame, logo and wordmark over it | todo | The title must stay a *pure function of the clock* or the `shots` hashes stop meaning anything (`testkit/devtest.h`). |
-| 2.4 | Measure: `perf scene=title` and `perf scene=space`, phase split recorded here | todo | Baseline to beat: 25.3 / 28.9 fps with the island. |
-| 2.5 | Delete the island: the heightmap, the obelisk, the beacons, `BENCH_SEED`'s island meaning | todo | Not before 2.1 is on screen -- the island is the fallback that makes 2.1 measurable against something. |
-| | **Accept:** >= 25 fps with Bob full-disc and Cheese in frame; the island is gone | todo | |
+| 2.1 | `game/scene.c` rewritten: bodies as lit spheres, camera-relative submission in metres (D-16), LOD ladder by projected radius | done | 2026-11-01. `main/game/scene.c` (705 lines) draws Bob, Cheese and Frodo as lit spheres from the rows `sim/bodies.c` keeps, at the positions `sim/ephemeris.c` puts them. Ladder is 6 rungs, 40 rings x 28 segs down to 6 x 6, chosen by projected radius; the whole scene runs at 66 triangles on the title and 221 in a chase view, against `SE_SCENE_TRI_CAP` 4,096. |
+| 2.2 | The sun as a direction: `normalize(Frodo - camera)` fed to the engine's directional light every frame | done | 2026-11-01. Frodo is drawn as an emissive disc at the bottom rung only to give the eye a place to put the light; the lighting itself is `se_light.h` directional, recomputed per frame from the camera. |
+| 2.3 | Starfield kept; the title screen becomes the ship drifting past Bob with Cheese in the frame, logo and wordmark over it | done | 2026-11-01. `nisp_camera_title` is a closed-form drift, so the screen is a pure function of the clock; the logo is decoded once at start (940x937 -> 341x340 RGB565 column layer, 252 ms) and never rescaled per frame. The title's own hash still moves on every rebuild because it prints the build stamp (F-19); the menu screens reproduce exactly (`011bbebf` settings, `ea95f026` display). |
+| 2.4 | Measure: `perf scene=title` and `perf scene=space`, phase split recorded here | done | 2026-11-01, in the emulator: title 30.39 fps / 66 tris (logo 6.0 ms), space 5.40 fps / 221 tris with `rast` 152.6 ms. The title is comfortably above the 25 fps baseline. The space number is the interpreter, not the badge (D-39) -- the badge run is still owed. |
+| 2.5 | Delete the island: the heightmap, the obelisk, the beacons, `BENCH_SEED`'s island meaning | done | 2026-11-01. Gone from `main/game/scene.c`; `main/game/scene.h:8` says so out loud -- "no heightmap and no island". "Landing" and "seeing the ground" now read the same radius test as `sim/surface.c`. |
+| | **Accept:** >= 25 fps with Bob full-disc and Cheese in frame; the island is gone | done | 2026-11-01: the island is gone, and the title runs 30.39 fps in the emulator. The badge number is still open (D-39) -- the emulator is not a speedometer. |
 | **3** | **The rocket, as maths (host only)** | | |
 | 3.1 | `rocket/parts.{c,h}`: the PART[] registry -- capsule, four engines, the solid booster, the cargo/adapter section, RCS, legs, separator; propellant density and structural fraction as constants | done | 2026-11-01. Four diameters (1.25 / 1.875 / 2.5 / 3.75 m), sixteen lengths (0.625 -> 10 m in 0.625 steps), propellant at 400 kg/m^3. Five rows (POD / MAIN / UPR / BST / CRG), five engines (Flea 30 kN 240 s, Relion 60 / 320, Skipper 180 / 270, Mainsail 300 / 290, solid Booster 400 / 180 sized by its own tank), three leg sets, RCS at 0.10 t and 15 kN m, separators at 0.05 t. `capacity_per_t` is the one column that was tuned rather than chosen (F-23). This table *is* the Engineering legend (Part B3). |
 | 3.2 | `rocket/stack.{c,h}`: blueprint -> total mass, per-stage mass, CoM, CoT, inertia, drag centre, static margin; recomputed on stage separation and as fuel burns | done | 2026-11-01. `nisp_stack_build` lays out `[pod, sep0, body0, booster0, legs0, sep1, body1, ...]` on an axis measured from the nose; one pass gives mass, CoM, CoT (at `part->x1`), the geometric drag centre, transverse inertia and `static_margin_m = cp_x - com_x`. `com_bias` (0.45 for the pod, 0.5 elsewhere) is what makes a lone capsule shield-heavy and therefore a dart (F-16). `nisp_stack_recompute` is the single re-entry point for burning, staging and splitting. |
@@ -1492,28 +1512,28 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 3.7 | `nispcheck` cases 9-10: the four heating profiles, the split arithmetic | done | 2026-11-01. Four profiles on one launcher: throttled launch peaks 0.125 (pod) to 0.329 (stages); nominal reentry 1.275 / 1.235 / 1.230 for the unshielded stages and 0.486 for the pod; engines-first 6.849 for the pod; the burnt-out dart 1.996 for the pod, shield-first and still fatal (F-16). `capacity_per_t` settled at POD 0.053 / MAIN 0.089 / UPR 0.161 / BST 0.087 / CRG 0.089 (F-23). Case 10: the split conserves mass, leaves the pod fragment with no lit engine, and gives each fragment its own CoM. |
 | | **Accept:** Part H 5-6 and 9-10 pass; a named design round-trips through the file byte-identically; a nominal launch heats nothing past 50 % | done | 2026-11-01: `nispcheck: ok (196 checks)`, `hostpurity: ok`, `app.so` links clean. Design encode/decode round trip checked in case 6. Nominal launch peaks at a third of the limit on every part, and a nominal reentry still kills the stages that have no shield. |
 | **4** | **Engineering** | | |
-| 4.1 | `engineering/builder.{c,h}`: the working design in RAM, the stage cursor, add / remove stage, the PARTS legend and its scroll | todo | Focus ring PARTS ⇄ BLUEPRINT; NOTES never takes focus (Part B2). |
-| 4.2 | Parameter ladders on the selected stage: diameter, length, engine, engine count, RCS, side boosters, leg set | todo | Ladders, not numeric fields; the sheet redraws on the same frame (Part B2). |
-| 4.3 | `engineering/sheet.{c,h}`: drafting-blue paper, minor/major grid, white pencil strokes from the stack maths, dimension callouts, title block, stowed and deployed leg strokes | todo | 2-D direct-565 lines, not `scene_line` (F-13, D-27). Legs are the one parameter drawn rather than only called out (Part V7). |
-| 4.4 | `engineering/notes.{c,h}`: the post-it cards, recomputed from `rocket/budget` on every edit | todo | Stage card, total card, conditional warning card (Part B4). Ratings only -- no survivability verdict, ever (D-37). |
-| 4.5 | `engineering/icons.{c,h}`: PART[] -> 32x32 pencil icons from the same geometry the sheet draws | todo | No image files, no sprite sheets (Part B3). |
-| 4.6 | Save / Save as / Load design / Launch, with **Launch disabled until the design is named** | todo | The user's rule, enforced in the menu (D-11); the unnamed state shows in the title block. |
-| 4.7 | The Spaceport hub screen, hung off the existing slot menu (Part N1) | todo | Function first, parameters second (D-24): the hub lists verbs, the design/mission picker is a second screen. |
-| 4.8 | Measure: `perf scene=engineering`, and decide there whether the sheet needs caching into a layer | todo | Target >= 40 fps. Half resolution does nothing here (Part B6). |
-| 4.9 | `music/engineering/` playlist: `sneaky_adventure.mp3` looped while Engineering is up, back to the menu track when it closes; Makefile stem lists and `metadata.json` extended | todo | Part N4. The `.txt` license travels with it, as always (D-06). |
-| | **Accept:** build a rocket on the badge that Part 3's budget says can reach 100 km, name it, launch it -- and the screen reads as a blueprint, not a menu | todo | |
+| 4.1 | `engineering/builder.{c,h}`: the working design in RAM, the stage cursor, add / remove stage, the PARTS legend and its scroll | done | 2026-11-01. `main/engineering/builder.c` (482 lines). Focus ring is three stops -- `NISP_FOCUS_PARTS` ⇄ `NISP_FOCUS_SHEET` ⇄ `NISP_FOCUS_ACTIONS` -- cycled by TAB (D-45); NOTES never takes focus, as planned. Columns 168 / 424 / 208 px across the 800 px screen, 22 px header, body from y 44. |
+| 4.2 | Parameter ladders on the selected stage: diameter, length, engine, engine count, RCS, side boosters, leg set | done | 2026-11-01. Nine rows -- diameter, length, engine, count, RCS, boosters, booster length, legs, Remove. The editor is a sub-mode of the BLUEPRINT stop: ENTER opens it, ESC or TAB closes it, so it is a ladder over the drawing rather than a fourth focus stop. Every ladder step calls `nisp_stack_build` and `nisp_budget_compute`, and the sheet redraws in the same frame. |
+| 4.3 | `engineering/sheet.{c,h}`: drafting-blue paper, minor/major grid, white pencil strokes from the stack maths, dimension callouts, title block, stowed and deployed leg strokes | done | 2026-11-01. `main/engineering/sheet.c` (369 lines). Paper `0xff1d4e89u`, pencil `0xffe8eef5u` with a dim variant for callouts, minor grid `0xff2a5f97u`, major `0xff3d75adu`, mark `0xfffff0c0u`. Scale is clamped to 4..26 px per metre so a 6-stage stack and a 2-stage one both read. Direct-565 runs only -- no `scene_line`, no 3-D submission (F-13, D-27). |
+| 4.4 | `engineering/notes.{c,h}`: the post-it cards, recomputed from `rocket/budget` on every edit | done | 2026-11-01. `main/engineering/notes.c` (273 lines). Manila stage card `0xffefd7a6u`, pink total card `0xfff0b6c0u`, yellow warning `0xfff6e27cu`, each a sheared `direct_565_tri` card with a folded corner and ink `0xff2b2418u` text. Delta-v, mass and TWR per stage and in total; the warning card appears for a TWR under 1 and for a design that cannot reach orbit. Ratings only -- no survivability verdict (D-37). |
+| 4.5 | `engineering/icons.{c,h}`: PART[] -> 32x32 pencil icons from the same geometry the sheet draws | done | 2026-11-01. `main/engineering/icons.c` (72 lines), `NISP_ICON_PX 32`, drawn with the same stroke routine as the sheet. No image files, no sprite sheet. |
+| 4.6 | Save / Save as / Load design / Launch, with **Launch disabled until the design is named** | done | 2026-11-01. Save and Launch are both refused while the design is unnamed, and launching writes the blueprint to the card before the mission starts, so "saved before launch" is enforced by code rather than by the player remembering (D-48). The unnamed state shows in the sheet's title block. |
+| 4.7 | The Spaceport hub screen, hung off the existing slot menu (Part N1) | done | 2026-11-01. Seven rows -- Continue mission, Build a rocket, Launch..., Designs..., Rename, Delete, Back -- with the pickers as their own screens (`SCR_LAUNCH`, `SCR_DESIGNS`, `SCR_DESIGN`) carrying 34x34 blueprint thumbnails. Opening a world opens its hub and launches nothing (D-49); the hub is a `main.c` mode (`MODE_WORLD`), not a menu detail. |
+| 4.8 | Measure: `perf scene=engineering`, and decide there whether the sheet needs caching into a layer | done | 2026-11-01. `perf scene=engineering`: 29.76 fps average (27.3..32.7), 66 tris, `rast` 0 -- the cost is entirely `draw` at 9.9..13.6 ms, and the frame is identical at t=0 and t=1.5 s (`51270ab0`), so nothing is being recomputed per frame. No caching into a layer yet. The >= 40 fps target is unmeasured on the badge (D-39). |
+| 4.9 | `music/engineering/` playlist: `sneaky_adventure.mp3` looped while Engineering is up, back to the menu track when it closes; Makefile stem lists and `metadata.json` extended | done | 2026-11-01. `MUSIC_ENGINEERING` is a context in `main/audio/music.h` alongside NONE / MENU / SPACE, set in `open_engineering()` and restored to MENU on the way out. `sneaky_adventure.mp3` and its license are in `music/engineering/` and go up with `make install`. |
+| | **Accept:** build a rocket on the badge that Part 3's budget says can reach 100 km, name it, launch it -- and the screen reads as a blueprint, not a menu | in progress | The blueprint half is settled: the emulator's engineering shot is 63 % blue paper, 5 % post-it, 2 % pencil, and it reads as a drawing rather than a list. The badge half is owed -- a person has to build a rocket on hardware, launch it, and measure the >= 40 fps target there. |
 | **5** | **Flight physics** | | |
-| 5.1 | `flight/physics.{c,h}`: rigid-body state, quaternion attitude, velocity-Verlet at `dt_phys` 0.02 s | todo | One body per fragment (D-22): nothing flexes, and a split makes two bodies out of one through the staging path (D-32). |
-| 5.2 | Thrust at CoT, `(CoT - CoM) x F` torque, staging, separators, booster burn-out and separation | todo | |
-| 5.3 | Drag and aero torque from `sim/atmosphere` and the stack's static margin, terminal velocity, the parachute | todo | The weathervane is what makes a lone capsule fly shield-first and a burnt-out stack fly like a dart (Parts A5, V4). Same equation, three orders of magnitude of `q`. |
-| 5.4 | SOI switching in flight; analytic coasting above the atmosphere, integration while thrusting or in air | todo | |
-| 5.5 | `flight/warp.{c,h}`: warp ladder, substep cap, the refusals (thrusting, in atmosphere) | todo | Warp 1000 while coasting must cost nothing (Part F1). |
-| 5.6 | RCS torque budget + SAS (damped attitude hold, reference directions) | todo | |
-| 5.7 | Leg deployment, per-fragment touchdown thresholds (`rated_v` / `rated_tilt`), impact, mission outcome | todo | Part V7. A leg set selects which thresholds apply; it does not add a contact mechanic. |
-| 5.8 | Music context switch: silence inside the atmosphere, `music/space/` above it, edge-triggered with the 60/70 km hysteresis band and a 0.5 s fade | todo | Part N4. The altitude the switch uses is the one `sim/atmosphere` already computes -- no second definition of "in the air". |
-| 5.9 | Heat in the tick: `rocket/heat` fed `rho`, `v_rel` and the attitude every substep; a failed part cuts the stack through the staging path | todo | Part F5. A burn-through is a staging event the player did not ask for -- same recompute, no second code path. |
-| 5.10 | Debris: ballistic bodies, capped at `NISP_DEBRIS_MAX`, each still heated and each allowed to fail once | todo | Drawn, and visible in map mode (Part F5). |
-| | **Accept:** a scripted launch reaches a stable 100 km orbit; a planned deorbit lands under chute on Bob and survives; a Cheese landing survives **on legs** and the same stack without legs wrecks; a too-steep deorbit loses the pod and the mission ends in the air; a reentry with the burnt-out stage still attached is stable, dart-shaped, and still cooks the capsule | todo | |
+| 5.1 | `flight/physics.{c,h}`: rigid-body state, quaternion attitude, velocity-Verlet at `dt_phys` 0.02 s | done | 2026-11-01. `main/flight/physics.c` (904 lines) and `main/common/quat.c` (164 lines), `NISP_PHYS_DT 0.02`. One body per fragment (D-22); a split goes through the staging path, not a second code path (D-32). |
+| 5.2 | Thrust at CoT, `(CoT - CoM) x F` torque, staging, separators, booster burn-out and separation | done | 2026-11-01. Thrust is applied at the stack's CoT and the torque is the lever arm crossed with it; CoM and CoT are recomputed every tick as propellant drains, so a stage that is half empty pushes differently than the same stage full. Side boosters burn out on their own clock and shed themselves mid-burn (F-25, D-42). |
+| 5.3 | Drag and aero torque from `sim/atmosphere` and the stack's static margin, terminal velocity, the parachute | done | 2026-11-01. The weathervane torque is `q * CdA * static_margin`, capped so its natural frequency fits the tick (F-30), plus rotational damping so it settles instead of swinging forever (F-32). Chute: 300 m^2 sized backwards from the 10 m/s it has to deliver (F-29), gated at q >= 40 Pa and v <= 300 m/s. Case 13's chute drop settles at 8.806 m/s terminal from either 1,500 m or 5,000 m. |
+| 5.4 | SOI switching in flight; analytic coasting above the atmosphere, integration while thrusting or in air | done | 2026-11-01. Handover converts velocity into the new body's frame, parent-relative (F-35). Case 11's Bob -> Cheese -> Bob round trip comes back 0.000487 km and 0.000000 km/s from where it started. |
+| 5.5 | `flight/warp.{c,h}`: warp ladder, substep cap, the refusals (thrusting, in atmosphere) | done | 2026-11-01. `main/flight/warp.c` (114 lines). Ceiling 10 in air, 100 while thrusting or steering, 10 when the next periapsis is under the air (F-34), 1,000 below 100 km, 10,000 above. A coast is verified against a 0.01 s RK4 reference to 0.015 km, and a capped frame costs 4 s of ticks. |
+| 5.6 | RCS torque budget + SAS (damped attitude hold, reference directions) | done | 2026-11-01. `main/flight/control.c` (153 lines). Authority is the RCS budget of the modules actually attached and nothing else: 45 kN m for a three-stage stack, 30 after a stage, 15 on the pod alone. SAS commands a rotation rate and chases it (F-36): a 30 degree error takes 629 frames at 10.5 s, peaks at 0.0862 rad/s -- exactly the authority limit -- and does not overshoot. |
+| 5.7 | Leg deployment, per-fragment touchdown thresholds (`rated_v` / `rated_tilt`), impact, mission outcome | done | 2026-11-01. A leg set selects the rating; it adds no contact mechanic (D-45). Case 13 lands on Cheese at 11.007 m/s with legs and wrecks the same stack without them. Hovering is a control problem, not a landing problem: 3.983 TWR at ignition with RCS and a hold, and it drifts with either one missing. |
+| 5.8 | Music context switch: silence inside the atmosphere, `music/space/` above it, edge-triggered with the 60/70 km hysteresis band and a 0.5 s fade | done | 2026-11-01. `NISP_MUSIC_SPACE_KM 70` / `NISP_MUSIC_AIR_KM 60` in `main/flight/mission.c`, edge-triggered off the same `nisp_atm_density` the physics uses. Silence on the pad and through the whole atmosphere; `impact_lento.mp3` only above the band. |
+| 5.9 | Heat in the tick: `rocket/heat` fed `rho`, `v_rel` and the attitude every substep; a failed part cuts the stack through the staging path | done | 2026-11-01. Case 13's too-steep deorbit burns the pod and the mission ends in the air; the same flight with the stages shed survives. A burnt-out stage left attached makes the stack a dart and still cooks the capsule (case 10, F-16). |
+| 5.10 | Debris: ballistic bodies, capped at `NISP_DEBRIS_MAX`, each still heated and each allowed to fail once | done | 2026-11-01. `NISP_DEBRIS_MAX 8` in `main/flight/mission.h`, oldest retired first. Debris is never controlled, so it coasts whenever it is free (F-31) and is heated on the same path as the ship. Drawn in the chase view; map mode arrives with Part 7. |
+| | **Accept:** a scripted launch reaches a stable 100 km orbit; a planned deorbit lands under chute on Bob and survives; a Cheese landing survives **on legs** and the same stack without legs wrecks; a too-steep deorbit loses the pod and the mission ends in the air; a reentry with the burnt-out stage still attached is stable, dart-shaped, and still cooks the capsule | done | 2026-11-01, host-scripted (`nispcheck` case 13, 383 checks overall): a 61.228 t launcher at 1.499 TWR spends 7,697 m/s over 150.1 s to reach space, circularises with a 127.6 m/s burn at apoapsis into an orbit 1.269 km round at a 299.1 km periapsis, comes down under a canopy at 8.806 m/s, and lands on Cheese at 11.007 m/s -- survivable on legs, fatal without them. The dart case is case 10's, measured rather than asserted. |
 | **6** | **HUD and controls** | | |
 | 6.1 | Orbital readouts: altitude, surface and orbital speed, Ap / Pe, period, time to Ap / Pe, inclination, current SOI, warp factor | todo | Replaces the island's MARK readout. |
 | 6.2 | Attitude indicator: prograde / retrograde / normal markers, the burn vector when a node is armed | todo | |
@@ -1828,6 +1848,87 @@ document if it ever happens:
   different columns of the same table, which is precisely why a design can have
   plenty of delta-v and still sit on the pad.
 
+- **F-27** 2026-11-01: **the emulator's trap table is a second export list, and
+  it drifts from the device's.** `logf` -- used by `rocket/budget.c` for the
+  Tsiolkovsky equation -- is in `../tanmatsu-graceloader/main/symbol_export/all`
+  and links fine on the badge, but the emulator's `src/shims/trap_list.h` had
+  no entry for it, so the app died at load there and nowhere else. The diff
+  that finds these is `nm -u build/app.so` against the `X(...)` names in the
+  trap list; it is worth running whenever a new libm call appears.
+
+- **F-28** 2026-11-01: **air density has to be re-derived inside the Verlet
+  step, not held across it.** The attitude and the frame's rotation are held
+  over 0.02 s, which is fine; the altitude moved is a few tens of metres
+  against a 5.6 km scale height, which is also fine, but only because it is
+  *recomputed* rather than assumed equal. Holding the density too gives a
+  second-order integrator a first-order error and quietly changes terminal
+  velocity.
+
+- **F-29** 2026-11-01: **the parachute's area was sized backwards from the
+  number it has to produce.** Part A3 promises a 10 m/s soft touchdown, so
+  `NISP_CHUTE_CDA_M2` is whatever delivers it: 300 m^2 gives a 1.0 t pod
+  7.3 m/s at sea level and a 5.0 t fragment 16 m/s. That is the honest
+  consequence of one canopy fitting every mass -- a heavy fragment needs legs
+  or a retro burn, and the harness now prints 8.806 m/s rather than a
+  hand-picked figure.
+
+- **F-30** 2026-11-01: **every velocity- or angle-dependent torque needs a
+  cap, or the tick stops meaning anything.** The weathervane torque is a
+  spring; a spring whose natural frequency exceeds the physics tick integrates
+  to noise, not to a turn. Each one is capped against `inertia *
+  NISP_TORQUE_OMEGA_MAX^2`, which says out loud how fast the air is allowed to
+  rotate the ship (about a second to line up with the flow). The same rule
+  covers the drag clamp -- one tick may not take more of the relative velocity
+  than the tick has -- and the last-resort rate cap in `flight/physics.c`.
+
+- **F-31** 2026-11-01: **steering costs the same as burning.** A coast is
+  analytic, and an analytic propagation applies no forces at all, so a ship
+  whose SAS is fighting a rotation cannot coast: `can_coast` refuses it and the
+  frame is paid for in ticks. The alternative -- a SAS that silently stops
+  working the moment the engines cut -- is a bug a player could never name.
+  Debris is never controlled, so it coasts whenever it is free.
+
+- **F-32** 2026-11-01: **the weathervane is a spring with no damper, and a
+  spring with no damper is a pendulum.** A capsule under a chute swung through
+  vertical, past it, and back, forever, and case 13's chute drop landed at 43
+  degrees of tilt on a perfectly good canopy. The damper is the same drag
+  applied to the sideways motion rotation creates: `0.5 * rho * |v_rel| *
+  sum(cd_a * d^2)`, which `rocket/stack.c` carries as `aero_damp_m4`.
+
+- **F-33** 2026-11-01: **a near-circular orbit produced a NaN, and the guard
+  after the square root could not catch it.** `1 + 2*eps*p/mu` is exactly zero
+  in theory and about -1e-15 in float; `sqrt` of that is NaN, and NaN compares
+  false against 0.0, so the check that used to sit after the root never fired
+  and the NaN propagated through a whole flight. The argument is clamped
+  before the root (`sim/kepler.c`).
+
+- **F-34** 2026-11-01: **the edge of the air is inside a chunk, never on a
+  chunk boundary.** A chunk exit is an SOI handover, and a warp-10,000 frame is
+  167 simulated seconds, so an orbit can dive through an atmosphere and come
+  back out without ever crossing a boundary -- the old code flew the whole way
+  through and reported the ship underground. Two answers: bisect the conic
+  inside the chunk, and refuse the high warp in the first place when the *next
+  periapsis* is under the air. Being above the air right now is not the test.
+
+- **F-35** 2026-11-01: **an SOI handover is a change of frame for the velocity
+  as well as the position.** The stored velocity is relative to the body being
+  left, so what has to be added is that body's velocity relative to the one
+  taking over -- not its velocity in the sun's frame. Frodo is the root and its
+  velocity is zero, which is why the leaving case looked right on its own; the
+  entering case subtracted a child's heliocentric velocity from a
+  parent-relative one and left Bob's own 9.3 km/s in the answer, turning a
+  Cheese approach into a flyby at ten times escape speed.
+
+- **F-36** 2026-11-01: **SAS has to command a rotation rate, not a spring
+  force.** A spring/damper on the angle looks right on paper: 1,200 kN m/rad on
+  a 30 degree error asks for 628 kN m, and a three-stage stack has 45. The
+  command saturates, the ship slews at full authority, the angle term collapses
+  on the way to the target while the ship is still rotating at 0.13 rad/s, and
+  what is left of the damping cannot stop it -- a limit cycle, which is F-30 at
+  scale. The switching law a real RCS runs (arrest rate `sqrt(2 * alpha *
+  angle)`, chased) holds at exactly the authority limit: 0.0862 rad/s, 629
+  frames, no overshoot.
+
 ### Decisions
 
 - **D-01** The game is **Null Island Space Program**, motto *"To nowhere, and
@@ -2005,6 +2106,35 @@ document if it ever happens:
   seen at two different times, and case 9 checks the *order* things die in, not
   only the peaks.
 
+- **D-45** **A touchdown rating belongs to the fragment, and legs only improve
+  it.** Each fragment's rating is the best deployed leg set attached to it, or
+  the capsule's bell rating if there is none; a leg set is never worse than the
+  bell. It selects which thresholds apply -- it does not add a contact
+  mechanic (Part V7, out of scope).
+
+- **D-46** **Control authority is the RCS budget of the modules that are
+  actually attached, and nothing hidden on top of it.** 45 kN m for a
+  three-stage stack, 30 after a stage, 15 on the pod alone. A rocket with no
+  RCS module anywhere has no authority at all, SAS included, and the SAS switch
+  does not change that.
+
+- **D-47** **A rocket with no RCS flips over in the air, and that is the
+  lesson, not a bug.** The weathervane turns whatever is broadest to face the
+  flow, which for a fat booster with a small pod is the wrong end forward. The
+  HUD says which way the air is pushing (Part A5); the fix is to buy RCS in
+  Engineering, not to ask the physics to be kinder.
+
+- **D-48** **Launching from Engineering writes the blueprint to the card
+  first.** "The player always has to save a design with a name before launch"
+  is enforced by the code path rather than by the player remembering: Launch is
+  refused while the design is unnamed, and a named-but-unsaved design is saved
+  before the mission begins.
+
+- **D-49** **Opening a world opens its Spaceport hub and launches nothing.**
+  The hub is a mode of `main.c` (`MODE_WORLD`), not a detail of the menu,
+  because it is where the game decides which mission or design the next verb
+  applies to (Part N1, D-24).
+
 ---
 
 ## Verification
@@ -2042,18 +2172,25 @@ document if it ever happens:
   reach the app at all (F-17).
 - `main/main.c` -- the mode machine and the frame loop; everything that changes
   which world is open or whether the port is a video link happens here.
-- `main/sim/` (to be written) -- the sky: `bodies.c` is the table the whole game
-  is built on, `kepler.c` is the arithmetic everything else depends on.
-- `main/rocket/` (to be written) -- `parts.c` is the parts table, `stack.c` is
-  the rigid-body geometry, `budget.c` is the number the builder lives by,
-  `heat.c` is the one per-part state and the rule that splits a rocket.
-- `main/engineering/sheet.c` (to be written) -- the blueprint renderer: paper, pencil
-  strokes, dimension callouts, title block. One function, three sizes (Part B5).
+- `main/sim/` -- the sky: `bodies.c` is the table the whole game is built on,
+  `kepler.c` is the arithmetic everything else depends on, `patches.c` is the
+  SOI chain and the handover (F-35).
+- `main/rocket/` -- `parts.c` is the parts table and the Engineering legend,
+  `stack.c` is the rigid-body geometry and the static margin, `budget.c` is the
+  number the builder lives by, `heat.c` is the one per-part state and the rule
+  that splits a rocket.
+- `main/flight/` -- `physics.c` is the tick (forces, torque caps, heat, SOI),
+  `mission.c` is the ship plus its debris and its music context, `warp.c` is the
+  ladder and its refusals, `control.c` is RCS authority and the SAS switching
+  law (F-36).
+- `main/engineering/` -- `builder.c` is the focus ring and the parameter ladders,
+  `sheet.c` is the blueprint renderer: paper, pencil strokes, dimension callouts,
+  title block. One function, three sizes (Part B5).
 - `main/map/planner.c` (to be written) -- the auto-planner, and the place where
   "simplified compared to Kerbal Space Program" is actually implemented.
 - `main/ui/menu.c` -- the title bar, the slots, the settings screens, the pause
   menu, and the Spaceport hub that the game hangs off.
-- `main/game/scene.c` -- the world as drawn: the island today, the three bodies
-  after step 2.1.
-- `tools/nispcheck.c` (to be written) -- the host harness, and the only thing
-  standing between this project and a plausible-looking wrong solar system.
+- `main/game/scene.c` -- the world as drawn: three lit spheres and a starfield,
+  camera-relative metres, the LOD ladder.
+- `tools/nispcheck.c` -- the host harness, 13 cases, and the only thing standing
+  between this project and a plausible-looking wrong solar system.

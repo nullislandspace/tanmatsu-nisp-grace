@@ -23,13 +23,16 @@
 // Nothing is bound to F1. The run loop answers F1 itself as "back to the
 // launcher" (se_run.h, f1_exits) and would never let a binding see it.
 static se_binding_def_t const BINDINGS[NISP_ACTION_COUNT] = {
-    [NISP_FORWARD]     = {NISP_FORWARD, "Thrust forward", "fwd", BSP_INPUT_SCANCODE_W},
-    [NISP_BACK]        = {NISP_BACK, "Thrust back", "back", BSP_INPUT_SCANCODE_S},
-    [NISP_LEFT]        = {NISP_LEFT, "Thrust left", "left", BSP_INPUT_SCANCODE_A},
-    [NISP_RIGHT]       = {NISP_RIGHT, "Thrust right", "right", BSP_INPUT_SCANCODE_D},
-    [NISP_UP]          = {NISP_UP, "Thrust up", "up", BSP_INPUT_SCANCODE_SPACE},
-    [NISP_DOWN]        = {NISP_DOWN, "Thrust down", "down", BSP_INPUT_SCANCODE_LEFTSHIFT},
-    [NISP_BOOST]       = {NISP_BOOST, "Boost", "boost", BSP_INPUT_SCANCODE_RIGHTSHIFT},
+    // The ids are the ones the template shipped with, and they stay: a
+    // saved binding is keyed by id, so re-meaning a key is free and moving
+    // an id is not (input.h).
+    [NISP_FORWARD]     = {NISP_FORWARD, "Pitch down", "fwd", BSP_INPUT_SCANCODE_W},
+    [NISP_BACK]        = {NISP_BACK, "Pitch up", "back", BSP_INPUT_SCANCODE_S},
+    [NISP_LEFT]        = {NISP_LEFT, "Yaw left", "left", BSP_INPUT_SCANCODE_A},
+    [NISP_RIGHT]       = {NISP_RIGHT, "Yaw right", "right", BSP_INPUT_SCANCODE_D},
+    [NISP_UP]          = {NISP_UP, "Throttle up", "up", BSP_INPUT_SCANCODE_SPACE},
+    [NISP_DOWN]        = {NISP_DOWN, "Throttle down", "down", BSP_INPUT_SCANCODE_LEFTSHIFT},
+    [NISP_BOOST]       = {NISP_BOOST, "Big step", "boost", BSP_INPUT_SCANCODE_RIGHTSHIFT},
     [NISP_LOOK_UP]     = {NISP_LOOK_UP, "Look up", "lookup", BSP_INPUT_SCANCODE_ESCAPED_GREY_UP},
     [NISP_LOOK_DOWN]   = {NISP_LOOK_DOWN, "Look down", "lookdown", BSP_INPUT_SCANCODE_ESCAPED_GREY_DOWN},
     [NISP_LOOK_LEFT]   = {NISP_LOOK_LEFT, "Look left", "lookleft", BSP_INPUT_SCANCODE_ESCAPED_GREY_LEFT},
@@ -38,6 +41,18 @@ static se_binding_def_t const BINDINGS[NISP_ACTION_COUNT] = {
     [NISP_SAVE]        = {NISP_SAVE, "Save", "save", BSP_INPUT_SCANCODE_F2},
     [NISP_INFO]        = {NISP_INFO, "Show position", "info", BSP_INPUT_SCANCODE_BACKSPACE},
     [NISP_SCREENSHOT]  = {NISP_SCREENSHOT, "Screenshot", "screenshot", BSP_INPUT_SCANCODE_0},
+    [NISP_ROLL_LEFT]   = {NISP_ROLL_LEFT, "Roll left", "rollleft", BSP_INPUT_SCANCODE_Q},
+    [NISP_ROLL_RIGHT]  = {NISP_ROLL_RIGHT, "Roll right", "rollright", BSP_INPUT_SCANCODE_E},
+    [NISP_STAGE]       = {NISP_STAGE, "Stage", "stage", BSP_INPUT_SCANCODE_X},
+    [NISP_CUT]         = {NISP_CUT, "Cut engines", "cut", BSP_INPUT_SCANCODE_Z},
+    [NISP_CHUTE]       = {NISP_CHUTE, "Parachute", "chute", BSP_INPUT_SCANCODE_C},
+    [NISP_LEGS]        = {NISP_LEGS, "Landing legs", "legs", BSP_INPUT_SCANCODE_V},
+    [NISP_SAS]         = {NISP_SAS, "Stability assist", "sas", BSP_INPUT_SCANCODE_B},
+    [NISP_RCS]         = {NISP_RCS, "RCS", "rcs", BSP_INPUT_SCANCODE_N},
+    [NISP_WARP_UP]     = {NISP_WARP_UP, "Warp faster", "warpup", BSP_INPUT_SCANCODE_F3},
+    [NISP_WARP_DOWN]   = {NISP_WARP_DOWN, "Warp slower", "warpdown", BSP_INPUT_SCANCODE_F4},
+    [NISP_MAP]         = {NISP_MAP, "Map", "map", BSP_INPUT_SCANCODE_TAB},
+    [NISP_CONFIRM]     = {NISP_CONFIRM, "Confirm", "confirm", BSP_INPUT_SCANCODE_ENTER},
 };
 
 // The navigation key a scancode ALSO arrives as, where there is one.
@@ -166,6 +181,11 @@ char const* input_key_name(uint16_t sc, char* buf, int cap) {
         case BSP_INPUT_SCANCODE_G: snprintf(buf, (size_t)cap, "%s", "G"); return buf;
         case BSP_INPUT_SCANCODE_I: snprintf(buf, (size_t)cap, "%s", "I"); return buf;
         case BSP_INPUT_SCANCODE_C: snprintf(buf, (size_t)cap, "%s", "C"); return buf;
+        case BSP_INPUT_SCANCODE_V: snprintf(buf, (size_t)cap, "%s", "V"); return buf;
+        case BSP_INPUT_SCANCODE_B: snprintf(buf, (size_t)cap, "%s", "B"); return buf;
+        case BSP_INPUT_SCANCODE_N: snprintf(buf, (size_t)cap, "%s", "N"); return buf;
+        case BSP_INPUT_SCANCODE_X: snprintf(buf, (size_t)cap, "%s", "X"); return buf;
+        case BSP_INPUT_SCANCODE_Z: snprintf(buf, (size_t)cap, "%s", "Z"); return buf;
         case BSP_INPUT_SCANCODE_SPACE: snprintf(buf, (size_t)cap, "%s", "Space"); return buf;
         case BSP_INPUT_SCANCODE_ENTER: snprintf(buf, (size_t)cap, "%s", "Enter"); return buf;
         case BSP_INPUT_SCANCODE_ESC: snprintf(buf, (size_t)cap, "%s", "Esc"); return buf;

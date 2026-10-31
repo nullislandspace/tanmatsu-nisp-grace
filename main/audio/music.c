@@ -14,17 +14,30 @@
 #include "se_mp3.h"
 #include "se_music_procedural.h"
 #include "common/rng.h"
+#include "ui/settings.h"
 
 static char const TAG[] = "nisp_music";
 
-// The menu's playlist, relative to the install directory (music.h).
-#define MUSIC_MENU_DIR "music/menu"
+// One directory per context (music.h): se_mp3 has no "play this file", so
+// a track that belongs to one place lives in a directory of its own.
+#define MUSIC_MENU_DIR        "music/menu"
+#define MUSIC_ENGINEERING_DIR "music/engineering"
+#define MUSIC_SPACE_DIR       "music/space"
 // The rest of what ships, and what a player drops in.
 #define MUSIC_POOL_DIR "music"
+
+// How long a context switch takes to fade out and back in, seconds. Short
+// enough that a menu that changes its mind is not noticeable, long enough
+// that the seam is a crossfade rather than a click.
+#define FADE_S 0.25f
 
 static music_source_t* s_src;
 static bool            s_mp3;
 static char            s_dir[160];  // the directory the playlist came from
+
+static int  s_ctx = MUSIC_MENU;  // what was asked for
+static int  s_live = -1;         // what the mixer has, -1 while it has nothing
+static float s_gain;             // 0..1, the fade's current value
 
 // The attribution for the track named in s_attr_track: read off the card
 // once per track rather than once per call (music_attribution).
@@ -43,31 +56,121 @@ static music_source_t* try_mp3(char const* base, char const* sub) {
     return src;
 }
 
-bool music_init(void) {
+// Build the source for `ctx`: its own directory, then the pool, then the
+// generator. The fallbacks are what keeps a card that predates this layout
+// -- or a context whose track was deleted -- from being silent (music.h).
+static music_source_t* build_source(int ctx) {
     char const* const base = graceloader_get_install_basepath();
+    if (base == NULL || base[0] == '\0') return NULL;
 
-    if (base != NULL && base[0] != '\0') {
-        s_src = try_mp3(base, MUSIC_MENU_DIR);
-        if (s_src == NULL) {
-            // No menu playlist -- maybe an install that predates the
-            // layout. Anything else on the card is better than silence.
-            s_src = try_mp3(base, MUSIC_POOL_DIR);
-        }
+    char const* dir = NULL;
+    switch (ctx) {
+        case MUSIC_MENU: dir = MUSIC_MENU_DIR; break;
+        case MUSIC_ENGINEERING: dir = MUSIC_ENGINEERING_DIR; break;
+        case MUSIC_SPACE: dir = MUSIC_SPACE_DIR; break;
+        default: return NULL;
     }
 
+    music_source_t* src = try_mp3(base, dir);
+    if (src == NULL && strcmp(dir, MUSIC_MENU_DIR) != 0) src = try_mp3(base, MUSIC_MENU_DIR);
+    if (src == NULL) src = try_mp3(base, MUSIC_POOL_DIR);
+    return src;
+}
+
+// Install a source for s_ctx, or clear the slot for MUSIC_NONE. Whatever
+// was there is the mixer's to shut down (se_audio.h), so nothing here
+// retains it -- which is why this runs once per switch and not per frame.
+static void install(int ctx) {
+    if (ctx == MUSIC_NONE) {
+        s_src = NULL;
+        s_mp3 = false;
+        audio_mixer_set_music(NULL);
+        s_live = MUSIC_NONE;
+        return;
+    }
+
+    s_src = build_source(ctx);
     if (s_src != NULL) {
         s_mp3 = true;
-        ESP_LOGI(TAG, "menu music from %s (%d track(s), looped)", s_dir, se_mp3_track_count(s_src));
+        ESP_LOGI(TAG, "%s music from %s (%d track(s), looped)", music_context_name(ctx), s_dir,
+                 se_mp3_track_count(s_src));
     } else {
         s_src = music_procedural_create(NULL, FALLBACK_SEED);
         s_mp3 = false;
+        if (s_src == NULL) {
+            s_live = MUSIC_NONE;  // nothing to play: leave the slot empty
+            audio_mixer_set_music(NULL);
+            return;
+        }
         ESP_LOGW(TAG, "no music on the card; the procedural generator plays instead");
     }
 
-    // The mixer owns it from here: it shuts the source down when it is
-    // replaced or when the mixer shuts down, so nothing here frees it.
     audio_mixer_set_music(s_src);
+    s_live = ctx;
+}
+
+bool music_init(void) {
+    s_ctx  = MUSIC_MENU;
+    s_gain = 0.0f;
+    install(s_ctx);
+    s_live = (s_src != NULL) ? s_ctx : MUSIC_NONE;
     return s_src != NULL;
+}
+
+char const* music_context_name(int ctx) {
+    switch (ctx) {
+        case MUSIC_NONE: return "silence";
+        case MUSIC_MENU: return "menu";
+        case MUSIC_ENGINEERING: return "engineering";
+        case MUSIC_SPACE: return "space";
+        default: return "?";
+    }
+}
+
+void music_set_context(int ctx) {
+    if (ctx < 0 || ctx >= MUSIC_CONTEXT_COUNT) ctx = MUSIC_NONE;
+    if (ctx == s_ctx) return;
+    s_ctx = ctx;
+    // The fade does the rest: down to nothing, swap, back up.
+}
+
+int music_context(void) {
+    return s_ctx;
+}
+
+// The mixer's volume is the setting times the fade, so a context switch and
+// a slider are the same mechanism, and a slider moved while a menu is up is
+// heard on the next frame without anyone having to be told.
+static void apply_volume(void) {
+    uint8_t const set = settings_music_volume();
+    audio_mixer_set_music_volume((uint8_t)((float)set * s_gain));
+}
+
+void music_update(float dt) {
+    if (dt <= 0.0f) return;
+    float const step = dt / FADE_S;
+
+    if (s_live != s_ctx) {
+        // Fading out. The swap happens at silence, which is the only
+        // moment a decoder can be torn down without being heard.
+        if (s_gain > 0.0f) {
+            s_gain -= step;
+            if (s_gain < 0.0f) s_gain = 0.0f;
+            apply_volume();
+            return;
+        }
+        install(s_ctx);
+        return;
+    }
+
+    if (s_ctx != MUSIC_NONE && s_gain < 1.0f) {
+        s_gain += step;
+        if (s_gain > 1.0f) s_gain = 1.0f;
+        apply_volume();
+        return;
+    }
+
+    apply_volume();
 }
 
 bool music_is_mp3(void) {

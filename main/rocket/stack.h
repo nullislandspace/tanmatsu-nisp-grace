@@ -93,6 +93,7 @@ typedef struct {
     int  live_stage;                         // -1 when nothing is left to fire
     int  legs_id[NISP_DESIGN_STAGE_MAX];     // nisp_legs_id_t per stage, 0 for none
     bool legs_deployed[NISP_DESIGN_STAGE_MAX];
+    bool rcs[NISP_DESIGN_STAGE_MAX];         // which stages have RCS modules (Part F2)
 
     // The sums (Part V4). Valid after nisp_stack_recompute.
     float mass_t;
@@ -101,12 +102,19 @@ typedef struct {
     float cot_x;      // centre of thrust, over the IGNITING engines only
     float cp_x;       // drag centre
     float static_margin_m;   // cp_x - com_x: positive is a dart (Part A5)
+    // Sum of cd_a * (drag centre - CoM)^2 over the parts: the aerodynamic
+    // rotational damping. A body turning in a flow has every part moving
+    // sideways through it, and the drag on that sideways motion is a torque
+    // that opposes the turn (F-32). Zero is a weathervane that swings forever.
+    float aero_damp_m4;
     float inertia_t_m2;      // transverse moment of inertia, t*m^2
     float cd_a_total;
+    float inertia_axial_t_m2;  // about the stack axis: what roll control fights
     float throttle;          // 0..1, applied to every armed engine
     float thrust_kn;         // the igniting engines, this instant
     float isp_s;             // thrust-weighted, for the HUD's accel number
     bool  has_capsule;
+    bool  parachute;         // the capsule's integrated chute, deployed
 } nisp_stack_t;
 
 // What one stage of a blueprint weighs, before any of it is attached to
@@ -164,6 +172,12 @@ bool nisp_stack_split(nisp_stack_t* s, int index, nisp_stack_t* other);
 
 // Drop a range of parts out of a stack (used by staging and by debris).
 int nisp_stack_drop_stage(nisp_stack_t* s, int stage);
+
+// The chute is part of the capsule (Part V1), so deploying it is a flag on
+// the stack rather than a part: it puts NISP_CHUTE_CDA_M2 of drag at the
+// capsule's aft end, which moves the drag centre aft and makes the fragment
+// fly shield-first (Part A3).
+void nisp_stack_deploy_chute(nisp_stack_t* s, bool deployed);
 
 void nisp_stack_deploy_legs(nisp_stack_t* s, int stage, bool deployed);
 bool nisp_stack_legs_deployed(nisp_stack_t const* s, int stage);

@@ -56,6 +56,10 @@ typedef struct {
 // when the player says so.
 void nisp_design_init(nisp_design_t* d);
 
+// The rocket the game flies when nobody has built one yet: named, two
+// stages, RCS and legs. The pad default and the test bench's ship.
+void nisp_design_demo(nisp_design_t* d);
+
 // Every field forced back into its ladder. Called after any edit, so no
 // caller can hand a stack a diameter of 3.14.
 void nisp_design_clamp(nisp_design_t* d);

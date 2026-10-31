@@ -42,6 +42,7 @@ set(APP_SOURCES
     main/crt0.c
     main/audio/music.c
     main/common/rng.c
+    main/common/quat.c
     main/common/vfs_compat.c
     main/save/save.c
     main/ui/settings.c
@@ -70,6 +71,21 @@ set(APP_SOURCES
     main/rocket/budget.c
     main/rocket/design.c
     main/rocket/heat.c
+    # The flight sim: rigid-body dynamics, the SAS controller, warp and the
+    # mission loop. Pure like the sim above (tools/hostpurity.sh), which is
+    # what lets tools/nispcheck.c fly whole missions on the host.
+    main/flight/physics.c
+    main/flight/control.c
+    main/flight/warp.c
+    main/flight/mission.c
+    # Engineering (Part B): the blueprint sheet, its icons, its notes and the
+    # editor that ties them together. 2-D direct-565 drawing and Hershey text
+    # only -- no scene, no camera, no PPA (F-13) -- and therefore not part of
+    # the host-pure set tools/hostpurity.sh checks.
+    main/engineering/sheet.c
+    main/engineering/icons.c
+    main/engineering/notes.c
+    main/engineering/builder.c
 )
 
 # Automated device tests (main/testkit/, README "Automated device tests").
@@ -84,6 +100,9 @@ list(APPEND APP_SOURCES
     main/testkit/showtime.c
 )
 add_compile_definitions(SCREENSHOT_DIR="/sd/nisp/test")
+# The engine's binding table defaults to 16 actions; NISP has 26 (Part F2,
+# plan 6.3), and se_bindings_init clamps the count silently otherwise.
+add_compile_definitions(SE_BINDINGS_MAX=32)
 
 # Include directories — add paths to your headers here
 set(APP_INCLUDES

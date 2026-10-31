@@ -8,9 +8,9 @@
 #   RUN perf  scene=<name> [secs=<n>]  frames, phase split, primitive counts
 #   RUN shots scene=<name> ms=<ms>,..  PNGs + framebuffer hashes, sd/nisp/test/
 #
-# Scenes today: title, space (the flight bench), and every menu screen --
-# worlds, world, new, delete, settings, controls, graphics, audio, display,
-# pause.
+# Scenes today: title, space (the flight bench), engineering (the blueprint
+# sheet), and every menu screen -- worlds, world/spaceport, launch, designs,
+# design, new, delete, settings, controls, graphics, audio, display, pause.
 #
 # Shot targets are stamp-free screens only. The title draws APP_BUILD_TIME, so
 # its hash changes on every rebuild while nothing about the screen did (F-19);
@@ -21,6 +21,10 @@
 
 RUN perf scene=title secs=6
 RUN perf scene=space secs=6
+RUN perf scene=engineering secs=6
+RUN shots scene=engineering ms=0,1500
+RUN shots scene=spaceport ms=0
+RUN shots scene=designs ms=0
 RUN shots scene=settings ms=0
 RUN shots scene=graphics ms=0
 RUN shots scene=audio ms=0
