@@ -1464,17 +1464,17 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 |---|---|---|---|
 | **0** | **Scaffolding (host only, no badge)** | | |
 | 0.1 | This document: design parts L O A V B F M N G H, the status table, F-01..F-19, D-01..D-41 | done | 2026-10-31. The game brief arrived the same day; the numbers in Part O are derived from KSP 1's published parameters and cross-checked against four player-quotable anchors (F-11). Design parts A5 (aerodynamics) and V7 (landing legs) came from the same conversation. |
-| 0.2 | `tools/nispcheck.c` + `make check` = `hostpurity` + `nispcheck`, and `make build` depends on it | todo | The host-purity grep is the load-bearing part: nothing under `main/sim/` or `main/rocket/` may include an engine or BSP header. |
-| 0.3 | `sim/units.h` and `sim/bodies.{c,h}`: the BODY[] registry, Bob / Cheese / Frodo as rows | todo | Units decided first, before any orbital code is written, because retrofitting km-into-metres is the expensive direction (D-15). |
-| 0.4 | CMake: the new directories in `APP_SOURCES` as they arrive; profiler phases `sim`, `phys`, `map` added to `testkit/profile.h` | todo | `SE_SCENE_TRI_CAP` 4,096 / `LINE_CAP` 4,096 / `POINT_CAP` 1,024 stay as they are until step 2.4 says otherwise. |
+| 0.2 | `tools/nispcheck.c` + `make check` = `hostpurity` + `nispcheck`, and `make build` depends on it | done | 2026-10-31. `tools/hostpurity.sh` greps `main/sim`, `main/rocket`, `main/flight` for engine/BSP/RTOS includes; `make check` builds `build/host/nispcheck` with `HOSTCC`/`HOSTCFLAGS` read out of `CMakeLists.txt` rather than written down twice. |
+| 0.3 | `sim/units.h` and `sim/bodies.{c,h}`: the BODY[] registry, Bob / Cheese / Frodo as rows | done | 2026-10-31. Sim in km / km-per-s / km^3-per-s^2 (D-15); `nisp_body_g0` converts to m/s^2 only where a TWR is quoted. Hill radii checked against SOIs: Cheese 3,170.9 km > 2,400, Bob 196,393 km > 84,160. |
+| 0.4 | CMake: the new directories in `APP_SOURCES` as they arrive; profiler phases `sim`, `phys`, `map` added to `testkit/profile.h` | done | 2026-10-31. The six `main/sim/*.c` files are in `APP_SOURCES`; `PROF_SIM`, `PROF_PHYS`, `PROF_MAP` appended before `PROF_COUNT` so existing phase numbers do not move. |
 | 0.5 | `nisp` in the virtual graceloader's app list, the imports its trap table was missing, its debug console backed by stdin, and one fixed command that runs the whole suite | done | 2026-10-31. `make emu-run` / `make emu-test` work from this repo; `perf` and `shots` both come back with records, and two identical runs of the manifest produce the same record chain (F-17, F-18, D-41). |
-| | **Accept:** `make check` green, `make build` clean, `make verify` passes | todo | |
+| | **Accept:** `make check` green, `make build` clean, `make verify` passes | done | 2026-10-31: `hostpurity: ok (13 files)`, `nispcheck: ok (79 checks)`, `app.so` links clean at 171,632 bytes of text. |
 | **1** | **The sky, as maths (host only)** | | |
-| 1.1 | `sim/kepler.{c,h}`: state <-> elements; elliptic and hyperbolic anomaly solvers; derived readouts (Ap, Pe, period, inclination, time to apsis) | todo | Elements are a view, the state vector is the truth (D-17). |
-| 1.2 | `sim/ephemeris.{c,h}` + `sim/patches.{c,h}`: circular body orbits, SOI entry/exit by conic-sphere intersection, the future-patch chain capped at 4 | todo | |
-| 1.3 | `sim/atmosphere.{c,h}` + `sim/surface.{c,h}`: exponential density, drag coefficient and reference area from the stack, the pad at 0N 0E with its 174.9 m/s rotational velocity | todo | |
-| 1.4 | `nispcheck` cases 1-4: the four KSP anchors, the 10,000-period round trip, the patched-conic transfer against a brute-force integrated reference, the Hohmann numbers | todo | 860 m/s out, 7.95 h coast, 360 m/s to circularise (F-11). |
-| | **Accept:** every case in Part H 1-4 passes, with the tolerances printed | todo | |
+| 1.1 | `sim/kepler.{c,h}`: state <-> elements; elliptic and hyperbolic anomaly solvers; derived readouts (Ap, Pe, period, inclination, time to apsis) | done | 2026-10-31. One conic formula for ellipse and hyperbola alike, from `p = h^2/mu`; elements double, state float (D-17). Found and fixed F-20 here. |
+| 1.2 | `sim/ephemeris.{c,h}` + `sim/patches.{c,h}`: circular body orbits, SOI entry/exit by conic-sphere intersection, the future-patch chain capped at 4 | done | 2026-10-31. Leaving a sphere is solved in one line (`acos((p/soi - 1)/e)`); entering one is a 128-sample scan plus bisection, because it is genuinely a three-body question. |
+| 1.3 | `sim/atmosphere.{c,h}` + `sim/surface.{c,h}`: exponential density, drag coefficient and reference area from the stack, the pad at 0N 0E with its 174.9 m/s rotational velocity | done | 2026-10-31. `sim/surface.c` is body-relative -- it does not add the body's own 13.6 M km inertial position, which is what the pad's 174.9 m/s depends on. |
+| 1.4 | `nispcheck` cases 1-4: the four KSP anchors, the 10,000-period round trip, the patched-conic transfer against a brute-force integrated reference, the Hohmann numbers | done | 2026-10-31, 79 checks. 80 km circular 2,278.6 m/s / 1,875.1 s; stationary 2,863 km; surface escape 3,430.5 m/s; Hohmann 860.2 m/s out, 7.947 h, 359.9 m/s; pad -> 100 km 2,605.4 m/s. The transfer case burns at a searched window (F-22) and agrees with a 0.01 s RK4 to 1.1 m. |
+| | **Accept:** every case in Part H 1-4 passes, with the tolerances printed | done | 2026-10-31: `nispcheck: ok (79 checks)`, every tolerance printed next to the number it allows. |
 | **2** | **The sky, on the badge** (replaces the island) | | |
 | 2.1 | `game/scene.c` rewritten: bodies as lit spheres, camera-relative submission in metres (D-16), LOD ladder 96x48 -> 12x6 by projected radius | todo | A full-disc Bob at the top LOD is over `SE_SCENE_TRI_CAP`; the ladder is what keeps it under, and step 2.4 measures where the ladder has to start. |
 | 2.2 | The sun as a direction: `normalize(Frodo - camera)` fed to the engine's directional light every frame | todo | The engine has no point lights and needs none here -- from near Bob, Frodo's direction is the same to within a fraction of a degree across the whole scene. |
@@ -1483,14 +1483,14 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 2.5 | Delete the island: the heightmap, the obelisk, the beacons, `BENCH_SEED`'s island meaning | todo | Not before 2.1 is on screen -- the island is the fallback that makes 2.1 measurable against something. |
 | | **Accept:** >= 25 fps with Bob full-disc and Cheese in frame; the island is gone | todo | |
 | **3** | **The rocket, as maths (host only)** | | |
-| 3.1 | `rocket/parts.{c,h}`: the PART[] registry -- capsule, four engines, the solid booster, the cargo/adapter section, RCS, legs, separator; propellant density and structural fraction as constants | todo | Data rows (Part V2), tuned by 3.3's numbers, not by feel (F-12). This table *is* the Engineering legend (Part B3). |
-| 3.2 | `rocket/stack.{c,h}`: blueprint -> total mass, per-stage mass, CoM, CoT, inertia, drag centre, static margin; recomputed on stage separation and as fuel burns | todo | 1-D along the stack axis (Part V4). The static margin is one more sum in the same pass (Part A5), and its sign is what Part H 5 checks. |
-| 3.3 | `rocket/budget.{c,h}`: delta-v per stage, TWR, burn time, total | todo | |
-| 3.4 | `rocket/design.{c,h}`: `/sd/nisp/designs/<name>.nbp`, the design list, rename, delete | todo | Shared between slots, not inside a slot (Part N3). |
-| 3.5 | `nispcheck` cases 5-6: the hand-computed stack, the delta-v budget, the TWR-under-1 trap | todo | |
-| 3.6 | `rocket/heat.{c,h}`: per-part accumulation, cooling, `temp >= 1` failure, the capsule shield factor | todo | One float per part (Part A4). Pure, so the thresholds are tunable on a host. |
-| 3.7 | `nispcheck` cases 9-10: the four heating profiles, the split arithmetic | todo | This is where `capacity` / `limit` / `shield` get their values (Part V2), and where the dart case proves the shield is a factor and not immunity (F-16). |
-| | **Accept:** Part H 5-6 and 9-10 pass; a named design round-trips through the file byte-identically; a nominal launch heats nothing past 50 % | todo | |
+| 3.1 | `rocket/parts.{c,h}`: the PART[] registry -- capsule, four engines, the solid booster, the cargo/adapter section, RCS, legs, separator; propellant density and structural fraction as constants | done | 2026-11-01. Four diameters (1.25 / 1.875 / 2.5 / 3.75 m), sixteen lengths (0.625 -> 10 m in 0.625 steps), propellant at 400 kg/m^3. Five rows (POD / MAIN / UPR / BST / CRG), five engines (Flea 30 kN 240 s, Relion 60 / 320, Skipper 180 / 270, Mainsail 300 / 290, solid Booster 400 / 180 sized by its own tank), three leg sets, RCS at 0.10 t and 15 kN m, separators at 0.05 t. `capacity_per_t` is the one column that was tuned rather than chosen (F-23). This table *is* the Engineering legend (Part B3). |
+| 3.2 | `rocket/stack.{c,h}`: blueprint -> total mass, per-stage mass, CoM, CoT, inertia, drag centre, static margin; recomputed on stage separation and as fuel burns | done | 2026-11-01. `nisp_stack_build` lays out `[pod, sep0, body0, booster0, legs0, sep1, body1, ...]` on an axis measured from the nose; one pass gives mass, CoM, CoT (at `part->x1`), the geometric drag centre, transverse inertia and `static_margin_m = cp_x - com_x`. `com_bias` (0.45 for the pod, 0.5 elsewhere) is what makes a lone capsule shield-heavy and therefore a dart (F-16). `nisp_stack_recompute` is the single re-entry point for burning, staging and splitting. |
+| 3.3 | `rocket/budget.{c,h}`: delta-v per stage, TWR, burn time, total | done | 2026-11-01. Two phases per stage: side boosters burn with the stage and shed their own dry mass mid-burn, then the core finishes (D-42). `reach_orbit_ok` is the 2,605.4 m/s figure from Part O5. |
+| 3.4 | `rocket/design.{c,h}`: `/sd/nisp/designs/<name>.nbp`, the design list, rename, delete | done | 2026-11-01. NBT through `se_save.h`, list / rename / delete, name clamped to 16 characters, and the encode/decode path compiled on the host under `SM_HOST` so case 6 can prove the round trip byte-identical. Shared between slots, not inside a slot (Part N3). |
+| 3.5 | `nispcheck` cases 5-6: the hand-computed stack, the delta-v budget, the TWR-under-1 trap | done | 2026-11-01. Case 5's hand table: CoM 6.3333 m, CoT 12.0 m, static margin -0.1905 m loaded and +2.4762 m burnt out, inertia 99.879 t m^2 wet and 23.176 dry. Case 6: 136.727 t at the pad, TWR 1.044, bottom stage 3,289.2 m/s against a 0.002 s stepped march that contains no rocket equation, 209.4 s burn, mixed-stage Isp 227.14 s, and the F-12 trap (enough delta-v, no liftoff). |
+| 3.6 | `rocket/heat.{c,h}`: per-part accumulation, cooling, `temp >= 1` failure, the capsule shield factor | done | 2026-11-01. `rate = K rho v^3 area expose / capacity` with `K = 1.5e-11`, `expose = 1 - shield * facing`, and a 30 s cooling time constant, so heat is accumulated and not a speed threshold. Capacity is `capacity_per_t * (dry + propellant)` fixed when the stack is built (F-23). Separators carry mass and no thermal capacity (F-24); a booster group presents n cylinders (F-25). One float per part (Part A4). Pure, so the thresholds are tunable on a host. |
+| 3.7 | `nispcheck` cases 9-10: the four heating profiles, the split arithmetic | done | 2026-11-01. Four profiles on one launcher: throttled launch peaks 0.125 (pod) to 0.329 (stages); nominal reentry 1.275 / 1.235 / 1.230 for the unshielded stages and 0.486 for the pod; engines-first 6.849 for the pod; the burnt-out dart 1.996 for the pod, shield-first and still fatal (F-16). `capacity_per_t` settled at POD 0.053 / MAIN 0.089 / UPR 0.161 / BST 0.087 / CRG 0.089 (F-23). Case 10: the split conserves mass, leaves the pod fragment with no lit engine, and gives each fragment its own CoM. |
+| | **Accept:** Part H 5-6 and 9-10 pass; a named design round-trips through the file byte-identically; a nominal launch heats nothing past 50 % | done | 2026-11-01: `nispcheck: ok (196 checks)`, `hostpurity: ok`, `app.so` links clean. Design encode/decode round trip checked in case 6. Nominal launch peaks at a third of the limit on every part, and a nominal reentry still kills the stages that have no shield. |
 | **4** | **Engineering** | | |
 | 4.1 | `engineering/builder.{c,h}`: the working design in RAM, the stage cursor, add / remove stage, the PARTS legend and its scroll | todo | Focus ring PARTS ⇄ BLUEPRINT; NOTES never takes focus (Part B2). |
 | 4.2 | Parameter ladders on the selected stage: diameter, length, engine, engine count, RCS, side boosters, leg set | todo | Ladders, not numeric fields; the sheet redraws on the same frame (Part B2). |
@@ -1751,6 +1751,83 @@ document if it ever happens:
   regressed. `settings_000000.png` hashed `d858e651` in both runs. Step 10.5
   is the fix; until then only stamp-free screens are valid references.
 
+- **F-20** 2026-10-31: **a round-trip test cannot catch a wrong periapsis,
+  and an equatorial orbit is where it hides.** `nisp_state_to_elements` had a
+  degenerate branch for `inc == 0` (no node line, so `nlen == 0`) that read
+  the periapsis angle as `atan2(e_y, e_x)` -- the eccentricity vector read in
+  the X-Y plane instead of the X-Z one. Every orbit in the ecliptic, which is
+  every orbit this game has, got its periapsis 90 degrees away. It survived
+  the round trip because `aop` and `m0` are recovered together and are
+  self-consistent: elements -> state -> elements -> state reproduces the
+  state exactly with the wrong `aop`. Only propagating *forward in time* and
+  comparing against an independent integrator showed it -- the analytic conic
+  and the RK4 disagreed by 14 million km, because the analytic one was
+  answering "where would this orbit be" for a different orbit. Fixed by using
+  `atan2(ahead, along)` in both branches, where `along`/`ahead` are the
+  eccentricity vector projected on `N` and `H x N`, which are defined even
+  when the node line is not.
+
+- **F-21** 2026-10-31: **the reference integrator sets the tolerance, so it
+  has to be the accurate one.** Two separate mistakes here. First, the RK4
+  wrote its result back into the float `nisp_state_t` every step, which
+  accumulates about 250 m of quantisation over a 15,500 s leg -- bigger than
+  the error the test is trying to see. Second, step size: RK4 is fourth
+  order, and near periapsis (680 km, 2.3 km/s) a 0.05 s step leaves 17 m of
+  its own error behind, while 0.0125 s leaves 4 m and 0.01 s leaves 1 m. A
+  5 m tolerance at 0.05 s was measuring the reference, not the code. The
+  reference now accumulates in double and runs at 0.01 s.
+
+- **F-22** 2026-10-31: **a transfer to Cheese has a window, and it is
+  narrow.** The 80 km -> 12,600 km Hohmann transfer is the right *shape* at
+  every moment and the right *meeting* at only some of them. Scanning one
+  synodic period (1,900.8 s) for the burn epoch, the best window in the whole
+  period passes 1,908 km from Cheese's centre -- inside its 2,400 km sphere
+  by 492 km, which is 20 % of the sphere. The reason is Cheese's 12 degrees
+  of inclination: the transfer stays in the ecliptic, so the meeting is only
+  close when Cheese is near one of its nodes. Two consequences. Part M3's
+  auto-planner has to *search* for a window rather than compute a phase from
+  a formula, and a planner that gets the phase wrong produces a perfectly
+  valid conic that simply misses -- no error, no crash, a flyby that does not
+  happen. Second, a real Cheese mission will want a plane change, which is
+  the first reason this game needs the "change inclination" maneuver type at
+  all.
+
+- **F-23** 2026-11-01: **the heat constants are only meaningful together with
+  the flight profile they are tuned against.** The first capacity table
+  (0.133 / 0.242 / 0.133 t per tonne) left a nominal reentry peaking at 0.85
+  on the unshielded stages: nothing ever burned, which makes the whole model
+  decoration. Two things had to change together -- the column, down to
+  0.089 / 0.161 / 0.087, and the launch profile, from a hard ascent that
+  integrates 1.4e9 of rho*v^3 through max q to a throttled one at 9.9e8. The
+  unthrottled number is not wrong: it is what a player who never pitches over
+  actually earns. It is just not the profile a constant should be *tuned*
+  against. Case 9 prints the peaks of all four profiles on every run, so a
+  retune is a diff against a recorded profile instead of a re-derivation.
+
+- **F-24** 2026-11-01: **a decoupler with an ordinary thermal capacity is the
+  first casualty of every flight.** Separators are real rows in the stack
+  (0.05 t each) and they sit in the flow. Scaled by mass like everything else,
+  one would have a fortieth of its stage's thermal mass at the same exposed
+  area, so every stage separation would start with the separator exploding and
+  every rocket would come apart exactly where it was supposed to come apart.
+  They carry mass and no heat capacity (`capacity = 0`), which extends Part
+  A4's list of what is deliberately not modelled.
+
+- **F-25** 2026-11-01: **side boosters are a group, not a part.** n boosters
+  mean n cylinders of drag and n engines of thrust, and they run out on their
+  own clock, not the stage's. The stack models them as one row with the
+  cylinder area multiplied by n and the propellant summed, which is what makes
+  "ignite with the stage, separate when spent" (Part V2) a property of the data
+  structure rather than a rule the flight code has to remember.
+
+- **F-26** 2026-11-01: **thrust cancels out of the rocket equation, and that
+  is the F-12 trap in one line.** The first hand check for a two-Skipper stage
+  multiplied its 360 kN of thrust by g0 and came out 33 % high; the answer is
+  `Isp * g0 * ln(m0/m1)`, which does not care how the thrust is split. Delta-v
+  comes from Isp and mass ratio; TWR and burn time come from thrust. Two
+  different columns of the same table, which is precisely why a design can have
+  plenty of delta-v and still sit on the pad.
+
 ### Decisions
 
 - **D-01** The game is **Null Island Space Program**, motto *"To nowhere, and
@@ -1909,6 +1986,24 @@ document if it ever happens:
   reviewable in the repo, and identical every time -- which is also what makes
   it approvable once instead of on every call (F-18). `make emu-run
   EMU_SECS=n` stays for the interactive window.
+
+- **D-42** **Stages ignite bottom-up.** Part V1 says "stage 1 fires first,
+  then the next stage down", which is a slip in ladder order: ladder index 0 is
+  the *topmost* row, and the stage that lights is the bottom-most one. Written
+  into `rocket/stack.h` and `rocket/budget.h` rather than left to be rediscovered,
+  because the ladder index and the firing order are two numbers that look alike.
+
+- **D-43** **Heat thresholds are set by `nispcheck`, not by flying a badge.**
+  The four profiles in case 9 are the definition of "nominal" for this game. A
+  constant changes by editing `rocket/parts.c` and reading the printed peaks,
+  not by launching at a device and guessing which part died.
+
+- **D-44** **A part that peaked over its limit is dead, even if it cooled
+  afterwards.** The harness flies heat open loop and records the first breach;
+  flight closes the loop and splits the stack the moment `nisp_heat_breach`
+  answers. Peak-over-limit and breached-during-the-profile are the same fact
+  seen at two different times, and case 9 checks the *order* things die in, not
+  only the peaks.
 
 ---
 

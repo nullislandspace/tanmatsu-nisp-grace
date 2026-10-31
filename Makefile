@@ -53,11 +53,52 @@ MAKEFLAGS += --silent
 all: build
 
 .PHONY: build
-build:
+build: check
 	@echo "=== Building app.so ==="
 	mkdir -p $(BUILD)
 	cd $(BUILD) && cmake .. && make
 	@echo "=== Build complete: $(BUILD)/app.so ==="
+
+# ---------------------------------------------------------------------
+# Host checks: no badge, seconds to run, and `build` depends on them so a
+# broken invariant stops the build that broke it (claudeplans/project.md,
+# Part H).
+#
+# The orbital maths and the rocket arithmetic are the two parts of this
+# game that can be wrong without anything looking wrong -- a sign error in
+# the static margin or a mean motion off by 2*pi produces a rocket that
+# misses the orbit the map says it reached. Those are checked here, on this
+# PC, against numbers a player can look up, before app.so is even linked.
+#
+# The engine's compile-time settings come out of CMakeLists.txt rather than
+# being written down twice: a host check running against different caps than
+# the app builds with is worse than no check.
+# ---------------------------------------------------------------------
+HOSTCC      ?= cc
+ENGINE_DEFS := $(shell sed -n 's/^add_compile_definitions(\(SE_[A-Z_]*=[0-9]*\))/-D\1/p' CMakeLists.txt)
+HOSTCFLAGS  := -O1 -Wall -Wextra -Werror=implicit-function-declaration \
+               -DSM_HOST -Imain -Itools -Isynthengine3D/include \
+               -Isynthengine3D/src/internal $(ENGINE_DEFS)
+
+# The pure set: everything Part H compiles against, and nothing else.
+PURE_SRCS := $(wildcard main/sim/*.c) $(wildcard main/rocket/*.c) $(wildcard main/flight/*.c) \
+             main/common/rng.c
+
+.PHONY: check
+check: hostpurity nispcheck
+
+# The pure set really is pure: no engine, no BSP, no FreeRTOS.
+.PHONY: hostpurity
+hostpurity:
+	./tools/hostpurity.sh
+
+# Orbital mechanics, patched conics, the atmosphere, the rocket equation,
+# heat. Every number the game is built on.
+.PHONY: nispcheck
+nispcheck:
+	mkdir -p $(BUILD)/host
+	$(HOSTCC) $(HOSTCFLAGS) tools/nispcheck.c $(PURE_SRCS) -lm -o $(BUILD)/host/nispcheck
+	$(BUILD)/host/nispcheck
 
 # SynthEngine3D, the 3D engine: not part of the template, added per app as a
 # git submodule (CMakeLists.txt builds it when synthengine3D/ is there, and is

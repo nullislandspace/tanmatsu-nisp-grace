@@ -42,6 +42,15 @@ typedef enum {
                     // 341 columns x 340 rows of blitted pixels, against a
                     // few hundred pixels of text. Not inside PROF_OVERLAY,
                     // so the two numbers add up instead of nesting.
+    PROF_SIM,       // the world's own bookkeeping: ephemeris, patched-conic
+                    // map prediction, mission state. Nothing to do with
+                    // pixels, so it is named separately from the drawing.
+    PROF_PHYS,      // the flight tick: rigid-body integration, thrust,
+                    // drag, heat. Runs at its own rate inside the frame,
+                    // which is the number that decides the warp ladder.
+    PROF_MAP,       // the map screen: orbit polyline, maneuver node, labels.
+                    // Overlay work, but the one overlay that scales with
+                    // how far ahead the player is looking.
     PROF_BLIT,      // engine present: frame handed to the LCD (se_present_stats)
     PROF_VSYNC,     // engine present: idle until the tearing-effect signal
     PROF_COUNT,

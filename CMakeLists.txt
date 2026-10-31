@@ -51,6 +51,25 @@ set(APP_SOURCES
     main/game/input.c
     main/game/scene.c
     main/game/hud.c
+    # The sim: orbital mechanics, patched conics, the atmosphere, the
+    # surface. Pure arithmetic with no engine and no BSP in it, which is
+    # what lets the same files be compiled by the host C compiler for
+    # `make check` (tools/hostpurity.sh).
+    main/sim/bodies.c
+    main/sim/kepler.c
+    main/sim/ephemeris.c
+    main/sim/patches.c
+    main/sim/atmosphere.c
+    main/sim/surface.c
+    # The rocket: the part registry, the stack maths, the delta-v budget,
+    # design files and the heat model. Pure as well -- design.c is the only
+    # one that talks to the filesystem, and it does it through se_save.h
+    # behind an SM_HOST guard so the host check can read the same code.
+    main/rocket/parts.c
+    main/rocket/stack.c
+    main/rocket/budget.c
+    main/rocket/design.c
+    main/rocket/heat.c
 )
 
 # Automated device tests (main/testkit/, README "Automated device tests").
