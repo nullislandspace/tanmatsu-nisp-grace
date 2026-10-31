@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "game/input.h"
 #include "game/scene.h"
 #include "rocket/parts.h"
 #include "rocket/stack.h"
@@ -455,12 +456,101 @@ static void bar_row(pax_buf_t* fb, float y, char const* label, float frac, uint3
 // The bottom centre: the engine and the control system, the two things a
 // player is actually doing, next to each other and under the reticle the
 // ship is pointed along.
+// Propellant, the way a player asks for it: how much is left of what the
+// armed stage can burn. A stage that has already burned out reads as an
+// empty bar, which is the correct answer and the one that says "stage it"
+// without a word being spent on it.
+static void draw_fuel(pax_buf_t* fb, nisp_mission_t const* m) {
+    nisp_stack_t const* const s = &m->ship.stack;
+    float left = 0.0f, full = 0.0f;
+    nisp_stack_propellant(s, s->live_stage >= 0 ? s->live_stage : -1, &left, &full);
+
+    float const frac = full > 0.0f ? left / full : 0.0f;
+    uint32_t const col = frac < 0.10f ? 0xffe8b0b0u : 0xffa8d8b0u;
+    char line[48];
+    snprintf(line, sizeof(line), "%.1f / %.1f t", (double)left, (double)full);
+    bar_row(fb, 338.0f, "FUEL", frac, col, line);
+}
+
+// The key legend (plan 6.3): what the keys do, spelled with the keys this
+// player actually has -- built from the bindings rather than written out, so
+// a remapped control says the remapped thing (D-58). Two small lines at the
+// very bottom, to be glanced at once and then ignored.
+static void legend_keys(char* buf, int cap, nisp_action_t const* acts, int n) {
+    buf[0] = '\0';
+    char key[16];
+    for (int i = 0; i < n; i++) {
+        input_key_name(input_key(acts[i]), key, sizeof(key));
+        int len = (int)strlen(buf);
+        if (len + (int)strlen(key) + 2 >= cap) break;
+        if (len > 0) {
+            buf[len] = '/';
+            buf[len + 1] = '\0';
+            len++;
+        }
+        snprintf(buf + len, cap - len, "%s", key);
+    }
+}
+
+static void legend_add(char* line, int cap, char const* label, nisp_action_t const* acts, int n) {
+    char keys[48];
+    legend_keys(keys, sizeof(keys), acts, n);
+    int const len = (int)strlen(line);
+    if (len >= cap) return;
+    if (len > 0) {
+        if (cap - len < 4) return;
+        line[len] = ' ';
+        line[len + 1] = ' ';
+        line[len + 2] = '\0';
+    }
+    snprintf(line + strlen(line), cap - (int)strlen(line), "%s %s", keys, label);
+}
+
+static void draw_legend(pax_buf_t* fb) {
+    static nisp_action_t const stage[] = {NISP_STAGE};
+    static nisp_action_t const throttle[] = {NISP_UP, NISP_DOWN};
+    static nisp_action_t const cut[] = {NISP_CUT};
+    static nisp_action_t const sas[] = {NISP_SAS};
+    static nisp_action_t const rcs[] = {NISP_RCS};
+    static nisp_action_t const steer[] = {NISP_FORWARD, NISP_BACK, NISP_LEFT, NISP_RIGHT};
+    static nisp_action_t const roll[] = {NISP_ROLL_LEFT, NISP_ROLL_RIGHT};
+    static nisp_action_t const legs[] = {NISP_LEGS};
+    static nisp_action_t const chute[] = {NISP_CHUTE};
+    static nisp_action_t const look[] = {NISP_LOOK_UP, NISP_LOOK_DOWN, NISP_LOOK_LEFT, NISP_LOOK_RIGHT};
+    static nisp_action_t const map_key[] = {NISP_MAP};
+
+    char one[128] = "", two[128] = "";
+    legend_add(one, sizeof(one), "stage", stage, 1);
+    legend_add(one, sizeof(one), "throttle", throttle, 2);
+    legend_add(one, sizeof(one), "cut", cut, 1);
+    legend_add(one, sizeof(one), "SAS", sas, 1);
+    legend_add(one, sizeof(one), "RCS", rcs, 1);
+    legend_add(two, sizeof(two), "steer", steer, 4);
+    legend_add(two, sizeof(two), "roll", roll, 2);
+    legend_add(two, sizeof(two), "legs", legs, 1);
+    legend_add(two, sizeof(two), "chute", chute, 1);
+    legend_add(two, sizeof(two), "look", look, 4);
+    legend_add(two, sizeof(two), "map", map_key, 1);
+
+    pax_vec2f const a = rendertext_size(NULL, 12.0f, one);
+    pax_vec2f const b = rendertext_size(NULL, 12.0f, two);
+    text(fb, 0xff9fb0b8u, 12.0f, ((float)DISPLAY_LOG_W - a.x) * 0.5f, 456.0f, one);
+    text(fb, 0xff9fb0b8u, 12.0f, ((float)DISPLAY_LOG_W - b.x) * 0.5f, 469.0f, two);
+}
+
 static void draw_controls(pax_buf_t* fb, nisp_mission_t const* m, nisp_readout_t const* r) {
     nisp_stack_t const* const s = &m->ship.stack;
     char line[96];
 
-    snprintf(line, sizeof(line), "%.0f%%  %.0f kN", (double)(s->throttle * 100.0f), (double)r->thrust_kn);
-    bar_row(fb, 378.0f, "THRUST", s->throttle, 0xffffc25au, line);
+    draw_fuel(fb, m);
+
+    // The bar is the DIAL and the number is what the engines are actually
+    // making, deliberately not the same quantity (D-56): a full bar over
+    // "0 kN" is what a rocket on the pad with cold engines looks like, and
+    // that mismatch is the whole answer to "is it firing".
+    snprintf(line, sizeof(line), "%.0f%%  %.0f kN", (double)(m->throttle * 100.0f), (double)r->thrust_kn);
+    uint32_t const thrust_col = m->ignited ? 0xffffc25au : 0xff6f7f88u;
+    bar_row(fb, 378.0f, "THRUST", m->throttle, thrust_col, line);
 
     // The heat bar is the only warning this game gives (Part A4): a part at
     // its limit is gone, and there is no repair. It stays off the screen
@@ -488,9 +578,14 @@ static void draw_controls(pax_buf_t* fb, nisp_mission_t const* m, nisp_readout_t
         snprintf(pieces, sizeof(pieces), "   %d loose piece%s", m->debris_count,
                  m->debris_count == 1 ? "" : "s");
     }
+    char const* const ignition =
+        m->ignited ? (m->throttle > 0.0f ? "engines lit" : "engines idle") : "engines cold";
     char status[160];
-    snprintf(status, sizeof(status), "stage %d/%d   SAS %s   %s%s%s%s", s->live_stage + 1, s->stage_count,
-             nisp_sas_name(m->sas), m->rcs ? "RCS on" : "RCS off", s->parachute ? "   chute" : "",
+    // Seven conversions, seven arguments. The tail is four optional words
+    // that are either a short label or "", which is why the format string
+    // reads as a sentence rather than as a list.
+    snprintf(status, sizeof(status), "stage %d/%d   %s   SAS %s   %s%s%s%s", s->live_stage + 1, s->stage_count,
+             ignition, nisp_sas_name(m->sas), m->rcs ? "RCS on" : "RCS off", s->parachute ? "   chute" : "",
              nisp_stack_legs_deployed(s, s->live_stage) ? "   legs" : "", pieces);
     pax_vec2f const sz = rendertext_size(NULL, 14.0f, status);
     text(fb, 0xffc8d8e0u, 14.0f, ((float)DISPLAY_LOG_W - sz.x) * 0.5f, 398.0f, status);
@@ -501,6 +596,8 @@ static void draw_controls(pax_buf_t* fb, nisp_mission_t const* m, nisp_readout_t
         pax_vec2f const s2 = rendertext_size(NULL, 13.0f, m->last_warp.reason);
         text(fb, 0xffffe0a0u, 13.0f, ((float)DISPLAY_LOG_W - s2.x) * 0.5f, 418.0f, m->last_warp.reason);
     }
+
+    draw_legend(fb);
 }
 
 void hud_draw(pax_buf_t* fb, nisp_game_t const* game, nisp_mission_t const* mission,

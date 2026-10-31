@@ -1450,7 +1450,7 @@ answer next to it:
     pod's own pods are a control module of their own after everything below
     has gone.
 
-Cases 1-6 and 9-15 are in `tools/nispcheck.c` today (471 checks). Cases 7 and 8
+Cases 1-6 and 9-16 are in `tools/nispcheck.c` today (502 checks). Cases 7 and 8
 are written down before they exist, because they are the acceptance test for the
 planner in block 8 -- the planner gets written when its test is already
 described.
@@ -1560,10 +1560,10 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 6.1 | Orbital readouts: altitude, surface and orbital speed, Ap / Pe, period, time to Ap / Pe, inclination, current SOI, warp factor | done | 2026-11-01. `main/game/hud.c` draws both columns: left is ALT / LOCAL / SPEED / V AIR or V GND / Q / MASS / TWR / MARGIN, right is APO / T+AP / PERI / T+PE / PERIOD / INCL / SOI / WARP, eight rows each at a fixed pitch so the numbers do not move when the flight changes. `nisp_time_to_apsis` feeds the two countdowns (`flight/physics.c`); LOCAL is `nisp_solar_time` coloured by `nisp_sun_elevation` (F-40). The clock is T+ from `mission.t_launch`, not the absolute sim clock. |
 | 6.2 | Attitude indicator: prograde / retrograde / normal markers, the burn vector when a node is armed | in progress | 2026-11-01. PRO / RET / NRM are projected through the engine's own pinhole (`hud.c` `view_at` / `project_dir`), the camera basis rebuilt from yaw / pitch / roll with `se_scene.c`'s formulas and the local frame mapped as (east, up, -north) exactly as `game/scene.c` maps its geometry -- so a marker lands on the scene that was drawn with them. Behind the eye: not drawn. Exactly to the side: no finite projection, so it is placed along its screen bearing and clamped to the edge of the sky, dimmed, because "that way, further out" is the reading. Measured in the emulator on the bench, where the nose is along the velocity: PRO at the pinhole centre (400, 256), NRM clamped to the right edge, RET absent. The burn vector waits on block 7's nodes. |
 | 6.3 | Throttle, staging, warp, SAS keys, all of them bindings in Settings -> Controls | done | 2026-11-01. KSP-like defaults -- WASD plus QE steer, L-Shift / L-Ctrl throttle, R-Shift boost, SPACE stage, X cut, C chute, G legs, T SAS, R RCS, M map, F3 / F4 warp, TAB focus, PgUp / PgDn time -- and 30 bindings in five rebinding sections (Flight 15, Map and warp 5, Engineering 2, Camera 4, System 4), reached Settings -> Controls -> section -> key (`ui/menu.c` `SCR_CONTROLS` / `SCR_KEYS`, D-54). `input_init` logs the per-section counts and warns about any action with no section, which is what catches a new action that forgot to be rebinding-able. |
-| 6.4 | Mode indicators: SAS on/off and its reference, auto-guidance armed, delta-v remaining on the armed node | in progress | The status line reads `stage 2/3  SAS prograde  RCS on  chute  legs`: the mode, its reference, and what has already been let go, all in words. Auto-guidance armed and the armed node's delta-v are 8.3's, and there is no node to arm until block 7. |
+| 6.4 | Mode indicators: SAS on/off and its reference, auto-guidance armed, delta-v remaining on the armed node | in progress | The status line reads `stage 2/3  engines cold  SAS prograde  RCS on  chute  legs`: the armed stage, what the engines are doing (D-56), the mode and its reference, and what has already been let go, all in words. Auto-guidance armed and the armed node's delta-v are 8.3's, and there is no node to arm until block 7. |
 | 6.5 | Heat readout: the hottest part as a bar against its limit, named when it passes 70 %, and a fragment count when the stack has split | done | 2026-11-01. The bar is off the screen below 2 % of the limit; past 70 % its value becomes `62% Main stage`, from `readout.heat_part` through `nisp_part_row(...)->name`, because which part is going is the part a player can still act on. The status line gains `N loose piece(s)` whenever `mission.debris_count` is non-zero (Part F5). |
 | 6.6 | Stability readout: the static margin as a signed number in metres, with the drag centre and CoM marked on the attitude indicator | done | 2026-11-01. `MARGIN` is the signed metres; the picture is a nose-to-tail strip under the left column -- a square for the mass, a mark pointing down for the drag centre, one pointing up for the thrust, each in its own colour -- drawn only while there is air. A strip rather than marks on the ship: the chase camera is behind and above it, where marks on the stack would sit under the reticle and behind the silhouette (D-37's teaching still happens, as a pair of marks crossing). |
-| | **Accept:** every number a flight needs is on screen, and every key that changes it is remappable | in progress | 2026-11-01, host + emulator: `nispcheck: ok (471 checks)`, `make emu-test` 12/12 ok, the flight bench still 221 triangles with the whole HUD on top of it, and two new screen references added to the manifest -- Controls `cda2f879`, Keys `c96e5467`. Owed: the badge run, which is the only frame rate that means anything for a HUD (D-39), and a look at the stability strip, which the bench never draws because the bench is above the air. |
+| | **Accept:** every number a flight needs is on screen, and every key that changes it is remappable | done | 2026-11-01, host + emulator: `nispcheck: ok (502 checks)`, `make emu-test` **12/12 ok**, the flight bench still 146 triangles with the whole HUD on top of it, and two new screen references added to the manifest -- Controls `cda2f879`, Keys `c96e5467`. The flight scene was crashing until the status line's format string was balanced (F-42); `-Werror=format` is on both builds now. Owed: the badge run, which is the only frame rate that means anything for a HUD (D-39), and a look at the stability strip, which the bench never draws because the bench is above the air. |
 | **7** | **Map mode and manual nodes** | | |
 | 7.1 | `map/map_view.{c,h}`: TAB to map, the current SOI's plane, Bob and Cheese as discs, Cheese's orbit, the ship | todo | The ship keeps flying while the map is up. |
 | 7.2 | `map/orbit_draw.{c,h}`: the conic as a polyline sampled from the elements (128 samples), plus the predicted path through the patch chain | todo | |
@@ -2000,6 +2000,42 @@ document if it ever happens:
   harness that measures only magnitudes.
 
 
+- **F-41** 2026-11-01: **a launch started underground, so there was no
+  planet.** The chase camera stood itself off "back along the nose from the
+  vessel's position" -- and a vessel's position is its *tail*, because parts
+  are drawn from the tail toward the nose. A rocket on the pad has its tail
+  on the pad, so "back along the nose from the tail" is a camera 12 m inside
+  Bob, and `submit_planet` declines to draw the body the camera is inside
+  (there is no such thing as the inside face of a sphere). The result is the
+  report "there is no planet, the sky is black with stars": not a lighting
+  bug, a camera standing in the wrong place. Three things follow, all in
+  `nisp_camera_chase`: aim at the *middle* of the vehicle, which needs its
+  length and is why `nisp_stack_length_m` exists in `rocket/stack.c` rather
+  than being recomputed where it is needed; trail along the track the ship
+  makes **over the ground**, because a ship on the pad already carries the
+  planet's 174.9 m/s and a camera reading that as a heading walks around the
+  pad once a day while the rocket never moves; and clamp the camera to a
+  radial altitude, never below the surface.
+
+- **F-42** 2026-11-01: **the flight-mode crash was a format string with one
+  `%s` too many.** Entering flight mode died on the badge in `vfprintf` with
+  a Load access fault at `MTVAL 0x48`, and the emulator segfaulted at the
+  same point, with nothing on screen to say where. Tracing the entry of every
+  function on the flight path put the fault inside `hud.c` `draw_controls`,
+  immediately after the THRUST bar: the status line's `snprintf` had been
+  extended with an ignition word and its tail left as `%s%s%s%s%s`, so the
+  format string asked for **seven** strings and the call passed **six**.
+  `vfprintf` read a seventh pointer that nobody passed and dereferenced it.
+  Two things about it are worth keeping. The compiler *said so* --
+  `format '%s' expects a matching 'char *' argument [-Wformat=]` -- and the
+  warning was one line among a build log and nobody read it. And a PC build
+  of the same code says nothing at all, which is the general form of the
+  problem: `-Werror=format` is now on both the app build (`CMakeLists.txt`
+  `app_obj`) and the host build (`Makefile` `HOSTCFLAGS`), so a format string
+  and its arguments disagreeing stops the build instead of arriving as a
+  Guru Meditation Error on a badge.
+
+
 ### Decisions
 
 - **D-01** The game is **Null Island Space Program**, motto *"To nowhere, and
@@ -2246,6 +2282,42 @@ document if it ever happens:
   it: the failure mode of an append-only action enum is a new action nobody
   can rebind, and that is a bug a log line can catch at boot.
 
+- **D-55** **The flight camera trails the ship over the ground and looks back
+  at its middle.** Not a chase camera in the inertial sense, and not a camera
+  pinned to the vessel's position: the ship is a 12 m object whose recorded
+  position is its tail (F-41), and the ground is what a player reads motion
+  against. Standing off is `back_m` / `up_m` scaled by the ship's own length,
+  so a 3 m rocket and a 20 m rocket are both framed the same way, and the
+  camera looks at the ship with the local vertical *at the camera* as up: the
+  horizon level, the ship in the middle of it.
+
+- **D-56** **A launch starts with the engines cold.** `SPACE` on a cold armed
+  stage LIGHTS it; the next press separates, as it always has. A stage with no
+  motor on it is a cargo stage and refuses rather than dropping itself. The
+  throttle dial is held but not obeyed while cold, and the HUD shows the dial
+  and the kilonewtons as two deliberately different quantities -- a full bar
+  over "0 kN" is what a rocket on the pad looks like, and it is the whole
+  answer to "is it actually firing". This is what the user asked for: dial the
+  engine up first, then let go with one key.
+
+- **D-57** **The sky is the sun's height times the air above you.** One
+  directional light, and it is Frodo (F-33's limit): `nisp_sky_argb` blends a
+  lit air colour into space black by `clamp01(0.5 + sun_elevation * 2.5)`
+  against an air column that decays with altitude and is zero above
+  `atmo_top_km` and zero on an airless body. Day is therefore a thing you can
+  see happening on a launch -- blue at the pad, grey by 100 km, black by 150
+  -- and a night launch is black from the first frame. A single directional
+  light has no shadows, so a planet is lit by where the sun is, not by what
+  is between it and the sun: Bob's night side is not dark, and that is a
+  known limit rather than something to fix.
+
+- **D-58** **The HUD's key legend is built from the live bindings.** The two
+  lines at the bottom of the flight screen ask `input_key_name` for each
+  action rather than naming keys, so a player who moves staging to a different
+  key reads a legend that matches the key they actually have. It is rebuilt
+  every frame from the binding table, which is the same reason the legend is
+  two short lines and not a table.
+
 
 ---
 
@@ -2305,5 +2377,5 @@ document if it ever happens:
   menu, and the Spaceport hub that the game hangs off.
 - `main/game/scene.c` -- the world as drawn: three lit spheres and a starfield,
   camera-relative metres, the LOD ladder.
-- `tools/nispcheck.c` -- the host harness, 15 cases, and the only thing standing
+- `tools/nispcheck.c` -- the host harness, 16 cases, and the only thing standing
   between this project and a plausible-looking wrong solar system.

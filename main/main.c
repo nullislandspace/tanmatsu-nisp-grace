@@ -97,9 +97,10 @@ static char const TAG[] = "nisp";
 #define NISP_WORLD_SEED 0x4e495350u  // "NISP"
 #define BENCH_SEED NISP_WORLD_SEED
 
-// The deep space behind the world. The stars are geometry, so this is
-// only what the scene leaves uncovered.
-#define SKY_ARGB 0xff05070du
+// The deep space behind the world (game/scene.h). The stars are geometry,
+// so this is only what the scene leaves uncovered -- and it is only what the
+// clear is when there is no air over the camera to make it blue. In daylight,
+// on a planet that has air, the clear is nisp_sky_argb() instead (D-57).
 
 // --- The state ----------------------------------------------------------
 
@@ -238,26 +239,19 @@ static void apply_audio(void) {
 
 // --- The ship: how big it is, how it is steered -------------------------
 
-// The rocket's length along its own axis, metres. The stack stores parts at
-// a distance from the nose, so the longest part is the tail.
-static float ship_length_m(nisp_vessel_t const* v) {
-    float x = 1.0f;
-    if (v == NULL) return x;
-    for (int i = 0; i < v->stack.count; i++) {
-        if (v->stack.part[i].x1 > x) x = v->stack.part[i].x1;
-    }
-    return x;
-}
-
-// Chase standoff, from the rocket's own length. A 6 m pod wants a camera 20
-// m back; a 40 m launcher wants one that can see all of it. A fixed number
-// would be either inside the rocket or leave it a speck, and the whole
-// point of the chase camera is to read the vehicle you are flying.
+// Chase standoff, from the rocket's own length (game/scene.h trails the ship
+// and looks back at its middle). Two things it has to get right at once: far
+// enough back that a 40 m launcher is not filling the frame, and low enough
+// above the ship's middle that the vehicle sits ON the horizon line rather
+// than below it. 2 x the length plus 12 m puts a 12 m rocket 36 m away and
+// 6 m above its own middle -- a 10 degree look-down against a 28 degree
+// vertical half-field, which is the ship in the middle of the frame with the
+// ground under it and the sky over it.
 static float ship_back_m(nisp_vessel_t const* v) {
-    return 2.5f * ship_length_m(v) + 15.0f;
+    return 2.0f * nisp_stack_length_m(v != NULL ? &v->stack : NULL) + 12.0f;
 }
 static float ship_up_m(nisp_vessel_t const* v) {
-    return 0.6f * ship_length_m(v) + 5.0f;
+    return 0.3f * nisp_stack_length_m(v != NULL ? &v->stack : NULL) + 3.0f;
 }
 
 // The bench: an orbit, not a flight. The test kit sets the clock rather
@@ -434,6 +428,19 @@ static void launch_design(nisp_design_t const* design) {
     nisp_camera_chase(&s_cam, &s_mission.ship, 0.0, ship_back_m(&s_mission.ship),
                       ship_up_m(&s_mission.ship));
     s_flying = true;
+
+    // Two things worth saying out loud the moment a rocket reaches the pad,
+    // because both are otherwise discovered by watching nothing happen:
+    // nothing is burning yet (D-56), and a rocket whose thrust is under its
+    // weight never leaves -- the pad holds it until the engines out-accelerate
+    // the planet (flight/physics.c), so a TWR under 1 is not a slow launch,
+    // it is a launch that does not happen.
+    flash("Engines cold: SPACE lights the stage");
+    if (s_readout.twr < 1.0f) {
+        char warn[48];
+        snprintf(warn, sizeof(warn), "TWR %.2f: this will not lift off", (double)s_readout.twr);
+        flash(warn);
+    }
 
     s_mode = MODE_PLAY;
     menu_close();
@@ -922,6 +929,7 @@ static void on_update(float dt, void* user) {
 }
 
 static void on_render(pax_buf_t* fb, void* user) {
+
     (void)user;
 
     // Two clocks, on purpose. The scene is asked where the planets are at the
@@ -954,15 +962,17 @@ static void on_render(pax_buf_t* fb, void* user) {
     // draws into the half-size layer it is that buffer which needs a
     // background: whatever the planets do not cover is what shows through
     // the upscale.
+    uint32_t const sky = sheet ? NISP_BLUEPRINT_ARGB : nisp_sky_argb(&s_cam, t);
+
     prof_begin(PROF_FILL);
     if (half) {
-        se_ppa_fill(target, 0, 0, DISPLAY_LOG_H / 2, SKY_ARGB);
+        se_ppa_fill(target, 0, 0, DISPLAY_LOG_H / 2, sky);
         se_ppa_wait_job(0);
     } else {
         // Straight into the framebuffer, so a CPU clear: the CPU draws
         // into this buffer next, and a DMA fill under its cache is a
         // coherence problem this path is not worth having.
-        pax_background(fb, sheet ? NISP_BLUEPRINT_ARGB : SKY_ARGB);
+        pax_background(fb, sheet ? NISP_BLUEPRINT_ARGB : sky);
     }
     prof_end(PROF_FILL);
 
@@ -1053,7 +1063,7 @@ void app_main(void) {
         // row for it, so the engine keeps it (se_run.h). Nothing here is
         // bound to F1 (game/input.c).
         .f1_exits      = true,
-        .backdrop_argb = SKY_ARGB,
+        .backdrop_argb = NISP_SKY_SPACE_ARGB,
     };
     static se_app_callbacks_t const cb = {
         .on_init     = on_init,

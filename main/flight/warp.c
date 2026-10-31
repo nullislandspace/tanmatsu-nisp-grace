@@ -20,7 +20,9 @@ float nisp_warp_level(int index) {
     return WARP[index];
 }
 
-int nisp_warp_levels(void) { return NISP_WARP_COUNT; }
+int nisp_warp_levels(void) {
+    return NISP_WARP_COUNT;
+}
 
 int nisp_warp_index_for(float warp) {
     int best = 0;

@@ -136,6 +136,8 @@ void nisp_mission_launch(nisp_mission_t* m, nisp_design_t const* d, int body, do
     m->t_launch = t;
     m->state = NISP_MISSION_FLYING;
     m->music_space = false;
+    m->ignited  = false;  // the pad is not a flight yet (D-56)
+    m->throttle = 0.0f;
 
     // The pad is not a flight yet: nothing is burning, and the chute and
     // the legs are stowed. nisp_vessel_pad did the stack; this is the log.
@@ -153,6 +155,10 @@ void nisp_mission_begin(nisp_mission_t* m, nisp_vessel_t const* v, double t) {
     m->t        = t;
     m->t_launch = t;
     m->state = NISP_MISSION_FLYING;
+    // A ship that is already flying is a mission whose engines were lit
+    // whenever it got there: the stage key separates here, as it always did.
+    m->ignited  = true;
+    m->throttle = 0.0f;
 
     nisp_readout_t r;
     nisp_vessel_readout(&m->ship, m->t, &r);
@@ -176,9 +182,25 @@ static void apply_commands(nisp_mission_t* m, nisp_control_t* ctl, nisp_readout_
 
     if (ctl->stage) {
         ctl->stage = false;
-        int const before = v->stack.count;
-        nisp_vessel_stage(v);
-        if (v->stack.count < before) m->stages_dropped++;
+        int const armed = v->stack.live_stage;
+
+        if (armed < 0) {
+            refuse(m, "Nothing left to stage");
+        } else if (!m->ignited) {
+            // Cold: this press lights the armed stage rather than dropping
+            // it (D-56). A stage with no motor on it is a cargo stage, and
+            // dropping it is not what the key was asked to do.
+            int const engines = nisp_stack_stage_engines(&v->stack, armed);
+            if (engines <= 0) {
+                refuse(m, "Stage has no engine to light");
+            } else {
+                m->ignited = true;
+            }
+        } else {
+            int const before = v->stack.count;
+            nisp_vessel_stage(v);
+            if (v->stack.count < before) m->stages_dropped++;
+        }
     }
 
     if (ctl->chute) {
@@ -297,8 +319,10 @@ void nisp_mission_step(nisp_mission_t* m, nisp_control_t* ctl, double frame_dt) 
 
     // 2. the throttle onto the stage that is armed. Re-arming every frame is
     // what makes the throttle key a throttle rather than an ignition switch,
-    // and it is what re-lights a stage after a coast or a burn-through.
-    nisp_stack_ignite(&m->ship.stack, m->ship.stack.live_stage, c->throttle);
+    // and it is what re-lights a stage after a coast or a burn-through. Cold
+    // engines are the one case where the dial is not obeyed (D-56).
+    m->throttle = c->throttle;
+    nisp_stack_ignite(&m->ship.stack, m->ship.stack.live_stage, m->ignited ? c->throttle : 0.0f);
 
     // 3. what this frame is allowed to simulate. Steering counts as powered
     // for the same reason burning does: neither can be coasted through.

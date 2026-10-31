@@ -40,6 +40,17 @@ void nisp_surface_velocity(int body, double t, float lat_rad, float lon_rad, dou
     out_kms[2] = vz;
 }
 
+void nisp_ground_velocity(int body, double const pos_km[3], double out_kms[3]) {
+    nisp_body_t const* b = nisp_body(body);
+    double const w = spin_rate(b);
+    // omega is along +y, so omega x r = (w*y? ...) -- written out: (0,w,0) x
+    // (x,y,z) = (w*z - 0, 0 - 0, 0 - w*x). At the pad, where r is +x, that
+    // is -z, which is the same answer nisp_surface_velocity gives there.
+    out_kms[0] = w * pos_km[2];
+    out_kms[1] = 0.0;
+    out_kms[2] = -w * pos_km[0];
+}
+
 float nisp_altitude(int body, double const pos_km[3]) {
     nisp_body_t const* b = nisp_body(body);
     double dx = pos_km[0], dy = pos_km[1], dz = pos_km[2];

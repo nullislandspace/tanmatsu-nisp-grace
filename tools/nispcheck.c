@@ -1695,6 +1695,7 @@ static void launch_reaches_space(void) {
     ctl.sas = NISP_SAS_HOLD;  // hold the heading it was built with, then turn prograde
     ctl.throttle = 1.0f;
     ctl.warp = 5.0f;
+    ctl.stage = true;  // one press lights the armed stage (D-56)
 
     float peak_q = 0.0f;
     fly_mission(&m, &ctl, 150.0, &peak_q, true);
@@ -1742,6 +1743,7 @@ static void launch_without_rcs_falls_over(void) {
         ctl.sas = rows[i].sas;
         ctl.throttle = 1.0f;
         ctl.warp = 5.0f;
+        ctl.stage = true;  // light it, or nothing happens (D-56)
         fly_mission(&m, &ctl, 3600.0, NULL, true);
 
         CHECK_MSG(m.state == NISP_MISSION_WRECKED, rows[i].what);
@@ -1999,7 +2001,11 @@ static void hovering_is_a_control_problem(void) {
         ctl.sas = rows[i].sas;
         ctl.throttle = 1.0f;
         ctl.warp = 10.0f;
-        for (int f = 0; f < 300 && m.state == NISP_MISSION_FLYING; f++) nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+        ctl.stage = true;  // the dial is set first, then one press lets go (D-56)
+        for (int f = 0; f < 300 && m.state == NISP_MISSION_FLYING; f++) {
+            nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+            ctl.stage = false;  // held down would drop the stage it just lit
+        }
 
         nisp_readout_t r;
         nisp_mission_readout(&m, &r);
@@ -2371,6 +2377,144 @@ static void case15_day_and_night(void) {
     bodies_without_a_day();
 }
 
+// =====================================================================
+// case 16 -- cold engines: the stage key lights first, separates second
+// ---------------------------------------------------------------------
+// D-56. A rocket on the pad is not a flight yet. The throttle dial is set
+// and remembered, and only obeyed once the stage key says so -- which is
+// what a launch looks like from the player's side: dial up, one press, go.
+// Checked here because "nothing happened" and "nothing was lit" look the
+// same from the outside, and a player has to be able to tell them apart.
+// =====================================================================
+
+static void cold_engines_hold_a_launch(void) {
+    nisp_design_t const d = launcher_design();
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_launch(&m, &d, BODY_BOB, 0.0);
+    CHECK(!m.ignited, "a launch starts with cold engines");
+    CHECK_NEAR(m.throttle, 0.0, 1e-6, "and with the dial at zero");
+
+    // The three numbers the HUD shows for this, before anyone presses
+    // anything: the dial the player is holding, the thrust that is not
+    // happening, and the propellant that is not being spent.
+    float const left0 = m.ship.stack.prop_t;
+    CHECK(left0 > 0.0f, "the tanks are full");
+    float left = 0.0f, full = 0.0f;
+    nisp_stack_propellant(&m.ship.stack, -1, &left, &full);
+    CHECK_NEAR(full, left0, 1e-3, "everything attached, summed");
+    CHECK_NEAR(left, full, 1e-6, "and none of it burned");
+    CHECK(nisp_stack_length_m(&m.ship.stack) > 1.0f, "the rocket has a length to put a camera behind");
+    CHECK(nisp_stack_stage_engines(&m.ship.stack, m.ship.stack.live_stage) == 3,
+          "the armed stage is the three-engine booster");
+
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_HOLD;
+    ctl.throttle = 1.0f;
+    ctl.warp = 1.0f;
+
+    for (int f = 0; f < 60; f++) nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    nisp_readout_t r;
+    nisp_mission_readout(&m, &r);
+
+    CHECK_NEAR(r.thrust_kn, 0.0, 1e-6, "a full dial burns nothing while cold");
+    CHECK_NEAR(r.twr, 0.0, 1e-6, "and has no TWR to show for it");
+    CHECK(m.ship.landed, "the pad still holds it");
+    CHECK_NEAR(m.throttle, 1.0, 1e-6, "the dial is remembered, not thrown away");
+    CHECK_NEAR(m.ship.stack.throttle, 0.0, 1e-6, "the stack is not burning");
+    CHECK_NEAR(m.ship.stack.prop_t, left0, 1e-6, "and has spent no propellant");
+
+    // One press: light it. Not drop it.
+    int const parts = m.ship.stack.count;
+    ctl.stage = true;
+    nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    CHECK(m.ignited, "one press of the stage key lights the armed stage");
+    CHECK(m.stages_dropped == 0, "and drops nothing when it does");
+    CHECK(m.ship.stack.count == parts, "the whole rocket is still attached");
+    CHECK(m.last_refusal[0] == '\0', "nothing was refused");
+    nisp_mission_readout(&m, &r);
+    CHECK(r.thrust_kn > 100.0f, "now the dial is obeyed");
+    CHECK_NEAR(m.ship.stack.throttle, 1.0, 1e-6, "at the throttle the player asked for");
+
+    // The next press is the one it has always been: separate.
+    ctl.stage = true;
+    nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    CHECK(m.ship.stack.count < parts, "the next press separates, as it always did");
+    CHECK(m.stages_dropped == 1, "once");
+    CHECK(m.ignited, "and the stage that took over is burning");
+}
+
+static void a_stage_without_an_engine_refuses(void) {
+    // A cargo stage has no motor on it, so the stage key has nothing to
+    // light and says so instead of quietly throwing the payload away.
+    nisp_design_t const d = flight_design("TEST-CARGO", NISP_KIND_CARGO, 2, 3, NISP_ENGINE_NONE, 1, true, 0);
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_launch(&m, &d, BODY_BOB, 0.0);
+
+    CHECK(nisp_stack_stage_engines(&m.ship.stack, m.ship.stack.live_stage) == 0, "a cargo stage brings no engines");
+
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_HOLD;
+    ctl.throttle = 1.0f;
+    ctl.warp = 1.0f;
+
+    int const parts = m.ship.stack.count;
+    ctl.stage = true;
+    nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    CHECK(!m.ignited, "so there is nothing to light");
+    CHECK(m.ship.stack.count == parts, "and nothing was dropped");
+    CHECK(m.last_refusal[0] != '\0', "with a reason the HUD can show");
+
+    // A stage key with nothing armed is the other refusal.
+    nisp_vessel_stage(&m.ship);
+    ctl.stage = true;
+    nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    CHECK(m.ship.stack.live_stage < 0, "nothing left armed");
+    CHECK(m.last_refusal[0] != '\0', "and the key says so too");
+}
+
+static void a_flight_starts_lit(void) {
+    // A ship that is already flying is a mission whose engines were lit
+    // whenever it got there: here the stage key separates, exactly as it
+    // did before the pad got a cold start.
+    nisp_design_t const d = flight_design("TEST-LIT", NISP_KIND_MAIN, 1, 5, NISP_ENGINE_SKIPPER, 1, true, 0);
+    nisp_vessel_t const v = circular_vessel(BODY_BOB, 900.0, &d);  // 300 km up: 900 km of radius
+
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_begin(&m, &v, 0.0);
+    CHECK(m.ignited, "a resumed flight is not a cold start");
+
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_OFF;  // no steering, so the only thing happening is the burn
+    ctl.throttle = 1.0f;
+    ctl.warp = 1.0f;
+
+    int const parts = m.ship.stack.count;
+    nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    nisp_readout_t r;
+    nisp_mission_readout(&m, &r);
+    CHECK(r.thrust_kn > 1.0f, "burning from the first frame");
+
+    ctl.stage = true;
+    nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+    CHECK(m.ship.stack.count < parts, "and the stage key separates here, as always");
+}
+
+static void case16_cold_engines(void) {
+    printf("case 16  cold engines: light, then separate\n");
+    cold_engines_hold_a_launch();
+    a_stage_without_an_engine_refuses();
+    a_flight_starts_lit();
+}
+
 int main(void) {
     printf("nispcheck  --  Null Island Space Program, host harness\n\n");
 
@@ -2399,6 +2543,8 @@ int main(void) {
     case14_blueprint();
     printf("\n");
     case15_day_and_night();
+    printf("\n");
+    case16_cold_engines();
     printf("\n");
 
     if (s_fail) {

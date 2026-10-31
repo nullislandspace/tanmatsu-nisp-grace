@@ -191,3 +191,10 @@ int nisp_part_stage(nisp_stack_t const* s, int index);
 int   nisp_stack_hottest(nisp_stack_t const* s);
 float nisp_stack_heat_load(nisp_stack_t const* s);
 
+// What a player asks about the stack: how long it is, whether a stage has
+// anything to light, and how much it has left to burn. `stage` -1 in the
+// last one means "everything still attached".
+float nisp_stack_length_m(nisp_stack_t const* s);
+int   nisp_stack_stage_engines(nisp_stack_t const* s, int stage);
+void  nisp_stack_propellant(nisp_stack_t const* s, int stage, float* left_t, float* full_t);
+

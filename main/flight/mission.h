@@ -81,6 +81,19 @@ typedef struct {
     int  sas;
     bool rcs;
 
+    // The stage key has two jobs and this says which one this press is
+    // (D-56). Cold means the armed stage is not burning: the next press of
+    // the stage key LIGHTS it rather than dropping it, which is what a
+    // launch starts with -- a rocket on the pad, a throttle dialled up
+    // first, and one key to let go. Lit means the next press separates, as
+    // it always has.
+    //
+    // `throttle` is the dial, not what the engines are getting: cold
+    // engines are burning nothing whatever the dial says, and the HUD has
+    // to show the dial the player is holding.
+    bool  ignited;
+    float throttle;
+
     // What the last frame cost, for the profiler and the HUD.
     nisp_warp_step_t last_warp;
 
@@ -92,10 +105,11 @@ typedef struct {
 
 void nisp_mission_init(nisp_mission_t* m);
 
-// On the pad, engines off, holding the throttle the player sets. `t` is the
-// absolute sim clock the launch happens at -- the pad is on a turning planet
-// in a solar system that is somewhere, and a launch in daylight is chosen
-// with nisp_local_noon (sim/ephemeris.h, plan 6.1) rather than assumed.
+// On the pad, engines COLD, holding the throttle the player sets but not
+// obeying it until the stage key says so (D-56). `t` is the absolute sim
+// clock the launch happens at -- the pad is on a turning planet in a solar
+// system that is somewhere, and a launch in daylight is chosen with
+// nisp_local_noon (sim/ephemeris.h, plan 6.1) rather than assumed.
 void nisp_mission_launch(nisp_mission_t* m, nisp_design_t const* d, int body, double t);
 
 // Adopt a vessel that is already somewhere: the resume path (9.3) restores a

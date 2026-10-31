@@ -115,8 +115,11 @@ set(APP_INCLUDES
 # Compile app sources as a relocatable object library
 add_library(app_obj OBJECT ${APP_SOURCES})
 target_include_directories(app_obj PRIVATE ${APP_INCLUDES})
+# -Werror=format: a format string and its arguments disagreeing is not a
+# warning here. It is vfprintf dereferencing a pointer nobody passed, which
+# is a Load access fault on the badge and nothing at all on a PC build.
 target_compile_options(app_obj PRIVATE
-    -Wall -Wextra -Wno-unused-parameter
+    -Wall -Wextra -Wno-unused-parameter -Werror=format
     -Os -fPIC
     -ffunction-sections -fdata-sections -fno-common
     -D__thread=

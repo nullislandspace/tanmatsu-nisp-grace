@@ -34,6 +34,14 @@ void nisp_surface_point(int body, double t, float lat_rad, float lon_rad, double
 // The velocity of that point, km/s. On Bob at the equator this is 0.17493.
 void nisp_surface_velocity(int body, double t, float lat_rad, float lon_rad, double out_kms[3]);
 
+// The velocity of the ground UNDER a point, km/s -- the same omega x r the
+// surface row integrates, for any radius, at no dependence on `t`. Subtract
+// it from a vessel's velocity and what is left is the speed the ground has:
+// zero for a ship sitting on the pad, 174.9 m/s less than the orbital one
+// for a ship in a low prograde orbit. game/scene.c needs exactly that to
+// tell "moving" from "co-rotating".
+void nisp_ground_velocity(int body, double const pos_km[3], double out_kms[3]);
+
 // Height above the surface, km. Negative means underground.
 float nisp_altitude(int body, double const pos_km[3]);
 

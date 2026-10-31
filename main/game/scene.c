@@ -173,6 +173,17 @@ void nisp_camera_aim(nisp_camera_t* cam, float const fwd[3], float const up[3]) 
     cam->roll = atan2f(-(s[0] * R[0] + s[1] * R[1] + s[2] * R[2]), s[0] * U[0] + s[1] * U[1] + s[2] * U[2]);
 }
 
+// Below this speed over the ground, "which way it is going" is not a
+// direction worth standing behind. 5 m/s is well under anything a ship does
+// under power and well over anything a drift or a numerical wobble is.
+#define CHASE_SPEED_MIN_MS 5.0f
+
+// The camera is never inside the body it is standing on. submit_planet
+// declines to draw the body the camera is inside (there is no such thing as
+// the inside face of a sphere), so a camera below the surface sees a planet
+// that is not there -- which is exactly F-41.
+#define CHASE_MIN_ALT_M 3.0f
+
 void nisp_camera_chase(nisp_camera_t* cam, nisp_vessel_t const* v, double t, float back_m, float up_m) {
     (void)t;  // the ship is the clock; the camera is wherever the ship is
 
@@ -182,26 +193,92 @@ void nisp_camera_chase(nisp_camera_t* cam, nisp_vessel_t const* v, double t, flo
     double up[3], north[3], east[3];
     nisp_local_frame(v->body, v->pos_km, up, north, east);
 
-    // The camera's up is the local vertical with the nose component taken
-    // out, so the horizon stays level however the ship is pointed. Straight
-    // up or straight down, that degenerates, and north takes over.
-    double u[3];
-    double dn = up[0] * nose[0] + up[1] * nose[1] + up[2] * nose[2];
-    for (int i = 0; i < 3; i++) u[i] = up[i] - nose[i] * dn;
-    if (sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]) < 0.1) {
-        dn = north[0] * nose[0] + north[1] * nose[1] + north[2] * nose[2];
-        for (int i = 0; i < 3; i++) u[i] = north[i] - nose[i] * dn;
+    // Aim at the MIDDLE of the vehicle. A vessel's position is its tail --
+    // parts are drawn from the tail toward the nose (flight/physics.h) --
+    // so "back along the nose" from the tail is into the ground, and a
+    // 12 m rocket on the pad has its tail ON the ground (F-41).
+    float const L = nisp_stack_length_m(&v->stack);
+    double aim[3];
+    for (int i = 0; i < 3; i++) aim[i] = v->pos_km[i] + (double)nose[i] * (0.5 * (double)L * NISP_KM_PER_M);
+
+    // Trail along the track the ship is making OVER THE GROUND. The inertial
+    // velocity is the wrong question here: a ship sitting on the pad already
+    // has the planet's 174.9 m/s in it (flight/physics.h), and a camera that
+    // read that as a heading would walk around the pad once a day while the
+    // rocket never moved.
+    double gv[3];
+    nisp_ground_velocity(v->body, v->pos_km, gv);
+    double rel[3];
+    for (int i = 0; i < 3; i++) rel[i] = v->vel_kms[i] - gv[i];
+
+    // Only the horizontal part of it: a camera 40 m under a rocket climbing
+    // straight up is the same black sky F-41 was.
+    double h[3];
+    double d = rel[0] * up[0] + rel[1] * up[1] + rel[2] * up[2];
+    for (int i = 0; i < 3; i++) h[i] = rel[i] - up[i] * d;
+    double hl = sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
+
+    if (hl * NISP_M_PER_KM < CHASE_SPEED_MIN_MS) {
+        // Standing still, or going straight up or down: the nose's own
+        // horizontal component, so a rocket lying on its side is looked at
+        // from in front of it.
+        d = (double)nose[0] * up[0] + (double)nose[1] * up[1] + (double)nose[2] * up[2];
+        for (int i = 0; i < 3; i++) h[i] = (double)nose[i] - up[i] * d;
+        hl = sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2]);
     }
-    double ul = sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
-    if (ul < 1e-9) ul = 1.0;
-    for (int i = 0; i < 3; i++) u[i] /= ul;
+    if (hl < 1e-6) {
+        // Vertical and stationary: north. Any fixed side would do; the one
+        // thing that matters is that it is the same side every frame, so a
+        // pad launch does not drift.
+        for (int i = 0; i < 3; i++) h[i] = north[i];
+        hl = 1.0;
+    }
+    for (int i = 0; i < 3; i++) h[i] /= hl;
+
+    // Stand off: back along the trail, up along the local vertical. `up_m`
+    // is measured from the middle of the ship, so the camera looks slightly
+    // down at it and the horizon stays in the upper half of the frame.
+    double pos[3];
+    for (int i = 0; i < 3; i++) {
+        pos[i] = aim[i] - h[i] * ((double)back_m * NISP_KM_PER_M) + up[i] * ((double)up_m * NISP_KM_PER_M);
+    }
+
+    // And never below the ground. Radial, not along the local vertical: at
+    // these distances they are the same to within a metre, and the radial
+    // one is exact at every altitude.
+    double const min_alt = (double)CHASE_MIN_ALT_M * NISP_KM_PER_M;
+    double const alt     = nisp_altitude(v->body, pos);
+    if (alt < min_alt) {
+        double const r = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
+        if (r < 1e-9) {
+            for (int i = 0; i < 3; i++) pos[i] = up[i] * (nisp_body(v->body)->radius_km + min_alt);
+        } else {
+            double const k = (r + (min_alt - alt)) / r;
+            for (int i = 0; i < 3; i++) pos[i] *= k;
+        }
+    }
 
     cam->frame_body = v->body;
-    for (int i = 0; i < 3; i++) {
-        cam->pos_km[i] = v->pos_km[i] - nose[i] * (back_m * NISP_KM_PER_M) + u[i] * (up_m * NISP_KM_PER_M);
+    for (int i = 0; i < 3; i++) cam->pos_km[i] = pos[i];
+
+    // Look at the ship with the local vertical at the CAMERA as up: the
+    // horizon level, the ship in the middle of it, and the planet filling
+    // everything below the horizon line -- which it does on its own, because
+    // submit_sphere tessellates outward from the near point and the near
+    // point is under the camera.
+    double los[3] = {aim[0] - pos[0], aim[1] - pos[1], aim[2] - pos[2]};
+    double ll      = sqrt(los[0] * los[0] + los[1] * los[1] + los[2] * los[2]);
+    if (ll < 1e-9) {
+        for (int i = 0; i < 3; i++) los[i] = h[i];
+        ll = 1.0;
     }
-    float const uf[3] = {(float)u[0], (float)u[1], (float)u[2]};
-    nisp_camera_aim(cam, nose, uf);
+    for (int i = 0; i < 3; i++) los[i] /= ll;
+
+    double cup[3], cn[3], ce[3];
+    nisp_local_frame(v->body, pos, cup, cn, ce);
+    float const fwd[3] = {(float)los[0], (float)los[1], (float)los[2]};
+    float const uf[3]  = {(float)cup[0], (float)cup[1], (float)cup[2]};
+    nisp_camera_aim(cam, fwd, uf);
 }
 
 // The title's standoff from Bob's centre, km. 2,600 km puts Bob's disc at
@@ -351,15 +428,93 @@ static void submit_sphere(float const c[3], float r, int rings, int segs, uint32
 }
 
 
+// --- Day and night -------------------------------------------------------
+
+// The colour behind the geometry (D-57). Two things make a sky: how high
+// the sun is, and how much air there is to scatter it. Above the air there
+// is nothing to scatter with, so the sky is the deep-space colour whatever
+// the clock says; on the ground at noon it is a pale blue; at the
+// terminator it is halfway between.
+//
+// The air factor is NOT the local density. What a camera sees when it looks
+// at the horizon is the whole slant column of air between it and that
+// horizon, and that fades far more slowly with height than the density
+// sitting at the camera does -- which is why a sky is still faintly blue at
+// 40 km while an airbreathing engine there is already starved. SKY_AIR_SCALE
+// is that difference, as one number.
+#define SKY_AIR_SCALE 3.0f
+#define DAY_SKY_ARGB 0xff7fb0dcu  // Bob's noon, as one flat colour
+
+static float clamp01(float x) {
+    return x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+}
+
+// How much of the day there is, from the sun's height at the camera: full
+// light a bit over 11 degrees up, full dark the same amount under the
+// horizon. nisp_sun_elevation returns the sine of the elevation.
+static float daylight_at(nisp_camera_t const* cam, double t) {
+    return clamp01(0.5f + nisp_sun_elevation(cam->frame_body, t, cam->pos_km) * 2.5f);
+}
+
+// How much air is over the camera, 1 at the surface and 0 above the air.
+// A body with no atmosphere has no sky, on Cheese or anywhere else.
+static float air_over(nisp_camera_t const* cam) {
+    nisp_body_t const* b = nisp_body(cam->frame_body);
+    if (b == NULL || b->atmo_scale_km <= 0.0f) return 0.0f;
+    float const alt = nisp_altitude(cam->frame_body, cam->pos_km);
+    if (alt >= b->atmo_top_km) return 0.0f;
+    if (alt <= 0.0f) return 1.0f;
+    return clamp01(expf(-alt / (SKY_AIR_SCALE * b->atmo_scale_km)));
+}
+
+uint32_t nisp_sky_argb(nisp_camera_t const* cam, double t) {
+    if (cam == NULL) return NISP_SKY_SPACE_ARGB;
+    float const k = daylight_at(cam, t) * air_over(cam);
+    if (k <= 0.0f) return NISP_SKY_SPACE_ARGB;
+    if (k >= 1.0f) return DAY_SKY_ARGB;
+
+    uint32_t const a = 0xff000000u;
+    uint32_t out = a;
+    for (int shift = 8; shift <= 24; shift += 8) {
+        float const lo = (float)((NISP_SKY_SPACE_ARGB >> shift) & 0xffu);
+        float const hi = (float)((DAY_SKY_ARGB >> shift) & 0xffu);
+        uint32_t const v = (uint32_t)(lo + (hi - lo) * k);
+        out |= v << shift;
+    }
+    return out;
+}
+
+// A colour scaled toward black, alpha kept. Used for the two things a
+// night actually darkens: the ground and the pad. The light model here is
+// one directional light with no shadow (se_light.h), so a face turned away
+// from the sun is still lit -- dimming what is drawn is the only way night
+// can be night without a shadow map.
+static uint32_t dim_argb(uint32_t c, float k) {
+    if (k >= 1.0f) return c;
+    if (k <= 0.0f) return c & 0xff000000u;
+    uint32_t out = c & 0xff000000u;
+    for (int shift = 8; shift <= 24; shift += 8) {
+        uint32_t const v = (uint32_t)(((float)((c >> shift) & 0xffu)) * k);
+        out |= v << shift;
+    }
+    return out;
+}
+
 // --- Stars, planets, the sun, the pad -----------------------------------
 
-static void submit_stars(void) {
+// Stars are geometry, not lighting: in daylight they are simply not there,
+// so their colour is scaled rather than the list being skipped. 600 points
+// is nothing to draw either way, and a starfield that pops out of existence
+// between frames is worse than one that fades.
+static void submit_stars(float gain) {
     for (int i = 0; i < STAR_N; i++) {
-        scene_point(s_star_dir[i][0] * SKY_R, s_star_dir[i][1] * SKY_R, s_star_dir[i][2] * SKY_R, s_star_col[i]);
+        scene_point(s_star_dir[i][0] * SKY_R, s_star_dir[i][1] * SKY_R, s_star_dir[i][2] * SKY_R,
+                    dim_argb(s_star_col[i], gain));
     }
 }
 
-static void submit_planet(cam_basis_t const* b, nisp_camera_t const* cam, int id, double t, float range_km) {
+static void submit_planet(cam_basis_t const* b, nisp_camera_t const* cam, int id, double t, float range_km,
+                          float exposure) {
     nisp_body_t const* body = nisp_body(id);
 
     double rel[3];
@@ -388,7 +543,8 @@ static void submit_planet(cam_basis_t const* b, nisp_camera_t const* cam, int id
     if (px < 0.6f) return;  // less than a pixel of disc: a point would lie about it
 
     int const lod = lod_for(px);
-    submit_sphere(c, r, LOD_RINGS[lod], LOD_SEGS[lod], (id == BODY_BOB) ? BOB_COL : CHEESE_COL, 0u);
+    uint32_t const col = dim_argb((id == BODY_BOB) ? BOB_COL : CHEESE_COL, exposure);
+    submit_sphere(c, r, LOD_RINGS[lod], LOD_SEGS[lod], col, 0u);
 }
 
 static void submit_sun(cam_basis_t const* b, double const sun[3]) {
@@ -679,13 +835,23 @@ int64_t nisp_scene_render(pax_buf_t* fb, nisp_camera_t const* cam, nisp_vessel_t
 
     float const range = nisp_view_range(view_preset);
 
+    // Day and night, as two numbers this frame's drawing scales by: how
+    // much sun there is at the camera, and how much air is over it. The
+    // clear colour is one of them (main.c asks for the same pair through
+    // nisp_sky_argb), the stars fade by the same pair, and the ground is
+    // dimmed by it -- because this light has no shadow (se_light.h) and a
+    // night that still lights the ground is not a night.
+    float const day = daylight_at(cam, t);
+    float const air = air_over(cam);
+    float const exposure = 0.25f + 0.75f * day * (air > 0.15f ? 1.0f : (air / 0.15f));
+
     prof_begin(PROF_SUBMIT);
     scene_begin(fb);
-    submit_stars();
+    submit_stars(1.0f - 0.9f * day * air);
     submit_sun(&b, d);
     for (int id = 0; id < BODY_COUNT; id++) {
         if (id == BODY_FRODO) continue;  // the disc above is Frodo
-        submit_planet(&b, cam, id, t, range);
+        submit_planet(&b, cam, id, t, range, exposure);
     }
     submit_pad(&b, cam, t);
     if (ship != NULL) submit_ship(&b, cam, ship);

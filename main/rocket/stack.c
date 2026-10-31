@@ -516,3 +516,51 @@ float nisp_stack_heat_load(nisp_stack_t const* s) {
     float const limit = s->part[i].limit > 0.0f ? s->part[i].limit : 1.0f;
     return s->part[i].heat / limit;
 }
+
+// --- What a player asks about the stack -------------------------------
+
+// How far down the tail goes, metres. The stack axis is measured from the
+// nose, so the longest x1 is the length of the whole vehicle. game/scene.c
+// needs it to stand a camera off far enough to see all of it, and the HUD
+// needs it for nothing -- which is why it lives here rather than being
+// recomputed in two places (F-41).
+float nisp_stack_length_m(nisp_stack_t const* s) {
+    if (s == NULL) return 0.0f;
+    float x = 0.0f;
+    for (int i = 0; i < s->count; i++) {
+        if (s->part[i].x1 > x) x = s->part[i].x1;
+    }
+    return x;
+}
+
+// How many engines a stage brings: its own motor(s) plus its side
+// boosters' motors. Zero means the stage key has nothing to light, which is
+// the difference between "SPACE ignites this stage" and "SPACE is refused".
+int nisp_stack_stage_engines(nisp_stack_t const* s, int stage) {
+    if (s == NULL || stage < 0) return 0;
+    int n = 0;
+    for (int i = 0; i < s->count; i++) {
+        nisp_part_t const* p = &s->part[i];
+        if (p->stage != stage) continue;
+        if (p->engine == NISP_ENGINE_NONE || p->engine_count <= 0) continue;
+        n += p->engine_count;
+    }
+    return n;
+}
+
+// How much propellant a stage holds and how much is left. `stage` -1 is
+// every part still attached, which is the number a player reads as "how
+// much rocket is left".
+void nisp_stack_propellant(nisp_stack_t const* s, int stage, float* left_t, float* full_t) {
+    float left = 0.0f, full = 0.0f;
+    if (s != NULL) {
+        for (int i = 0; i < s->count; i++) {
+            nisp_part_t const* p = &s->part[i];
+            if (stage >= 0 && p->stage != stage) continue;
+            left += p->prop_t;
+            full += p->prop_full_t;
+        }
+    }
+    if (left_t) *left_t = left;
+    if (full_t) *full_t = full;
+}

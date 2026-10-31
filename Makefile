@@ -80,7 +80,7 @@ build: check
 # ---------------------------------------------------------------------
 HOSTCC      ?= cc
 ENGINE_DEFS := $(shell sed -n 's/^add_compile_definitions(\(SE_[A-Z_]*=[0-9]*\))/-D\1/p' CMakeLists.txt)
-HOSTCFLAGS  := -O1 -Wall -Wextra -Werror=implicit-function-declaration \
+HOSTCFLAGS  := -O1 -Wall -Wextra -Werror=implicit-function-declaration -Werror=format \
                -DSM_HOST -Imain -Itools -Isynthengine3D/include \
                -Isynthengine3D/src/internal $(ENGINE_DEFS)
 

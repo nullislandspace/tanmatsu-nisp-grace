@@ -62,9 +62,22 @@ void nisp_scene_init(uint32_t seed);
 // `cam`'s frame axes. The camera position is the caller's business.
 void nisp_camera_aim(nisp_camera_t* cam, float const fwd[3], float const up[3]);
 
-// A chase camera behind and above the ship, looking along its nose.
-// `back_km` / `up_km` are metres of standoff, in the ship's own axes.
+// The deep-space colour: what the sky is where there is no air to give it a
+// colour. The clear behind the geometry is this at night and above the air,
+// and something else in daylight (nisp_sky_argb).
+#define NISP_SKY_SPACE_ARGB 0xff05070du
+
+// A chase camera that trails the ship and looks back at it (D-55): stood off
+// along the track the ship is making over the ground, at the middle of the
+// vehicle, and never below the surface it is looking across. `back_m` /
+// `up_m` are metres of standoff from the ship's middle.
 void nisp_camera_chase(nisp_camera_t* cam, nisp_vessel_t const* v, double t, float back_m, float up_m);
+
+// What the sky behind the geometry should be cleared to, at this camera at
+// this moment: NISP_SKY_SPACE_ARGB in space and at night, a pale blue on the
+// ground at noon, and the blend of the two in between (D-57). main.c clears
+// with it; scene.c draws with the same two factors.
+uint32_t nisp_sky_argb(nisp_camera_t const* cam, double t);
 
 // The title's camera: a scripted drift past Bob with Cheese in the frame.
 // A pure function of the clock, which is what keeps the shot hashes
