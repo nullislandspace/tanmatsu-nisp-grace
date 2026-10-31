@@ -12,6 +12,11 @@ device test kit wired to a scripted flight path.
 The island is one small fixed mesh submitted in full every frame. There is no
 chunk streaming here, whatever SynthMiner does.
 
+The design and the step-by-step status of the game live in
+[`claudeplans/project.md`](claudeplans/project.md): the body table, the rocket
+blueprint model, the flight physics, the map and maneuver planner, and the
+plan with its progress table. It is updated as part of the work, not after it.
+
 ### Where the files live
 
 | Path | What |

@@ -1,0 +1,1964 @@
+# Implementation plan: Null Island Space Program
+
+Living document: design, step-by-step status, findings and decisions.
+Updated whenever a step starts or finishes, something is measured, or
+something is decided. Game design brief received from the user on
+2026-10-31; this document is part of the repository and is committed with
+the work it describes.
+
+**Game:** *Null Island Space Program* -- "To nowhere, and beyond!"
+Kerbal Space Program 1 re-envisioned for the Tanmatsu: build a rocket as a
+blueprint, fly it, plan maneuvers on a simplified map. Slug
+`at.cavac.nisp`, SD card only, SynthEngine3D.
+
+## Context
+
+What exists today is a solid skeleton, not a game: SynthEngine3D as a
+submodule (v2.7), the engine splash on boot, the logo blit on the title,
+the Play / Settings / Quit bar, save slots, `settings.txt`, the menu music
+(`brittle_rille.mp3`, looped), the livestream as a setting, and the device
+test kit driven by a scripted flight path. `main/` is ~5,200 lines and
+`make build` / `make verify` are clean.
+
+What it flies over is a placeholder: a seeded heightmap island at 0N 0E,
+an obelisk, six survey markers, a starfield, and a directional sun. That
+placeholder is about to be replaced by the actual subject of the game --
+a planet, a moon and a sun that a ship can orbit, leave and land on.
+
+**The user's brief (2026-10-31), in short.**
+
+- Three bodies for now: **Planet Bob** (a Kerbin analogue), its moon
+  **Cheese** (a Mun analogue), and the sun **Frodo** (Kerbol). Size,
+  gravity and orbit roughly Kerbal-scale (Part O).
+- **No free-hand rocket building** -- there is no mouse. A rocket is a
+  blueprint: a control capsule on top, then stages added one at a time
+  downwards, each stage configured (diameter and length = how much fuel,
+  engine type, RCS yes/no, side boosters, landing legs). Stage separators
+  are implicit.
+  Side boosters ignite with their stage's main engine and separate when
+  burned out.
+- The capsule always exists, always on top, and carries an integrated heat
+  shield and parachute. Robotic only -- no crew for now.
+- **A design has to be saved under a name before it can be launched.**
+- **A rocket is one rigid body.** No joints, no wobble. Center of mass and
+  center of thrust are computed over all connected parts and change as
+  fuel burns and stages separate. This is the single biggest simplification
+  in the whole project and it is what makes the physics affordable here.
+- No science points, no money, no achievements. The goal is: build rockets
+  that fly.
+- Three flight modes: fully manual, stability assist, automatic guidance
+  onto the next planned maneuver.
+- **Simplified map / maneuver planner.** Either place a node on the
+  current orbit and edit its six axes with six keys, or (TAB) switch to
+  the auto-planner, pick a maneuver type -- *change apoapsis*, *change
+  periapsis*, *change inclination* -- enter the parameter, and let the
+  planner choose the time and the thrust vector for you.
+- Menu, audio and display settings stay the SynthMiner shape (they are
+  already that shape; see Part N).
+
+**Follow-ups from the same conversation**, each of which became a decision
+rather than a passing note: the build screen is **Engineering** (D-34); a part
+that overheats explodes and **splits the stack**, and the capsule's fragment is
+the mission (D-30..D-33); **basic aerodynamics** decides which way the air
+points the rocket, and an empty stage still attached makes it fly like a dart
+(D-35); the heat shield is a **factor, not immunity** (D-36); Engineering
+prints part **ratings** and never a survivability verdict (D-37); stages can
+carry **landing legs**, which is what makes Cheese landable (D-38); and music
+is per context -- menu, Engineering, silence in the air, `impact_lento` above
+it (D-28, D-29).
+
+**What this plan is not.** It does not design the career, the tech tree,
+parts beyond what flying needs, crew, docking, rovers, or other bodies.
+Those are later documents; the numbering here leaves room for them.
+
+## About this document
+
+Parts L, O, A, V, B, F, M, N, G, H are the design. Part D is the
+step-by-step plan with the status table. Part E is the findings and
+decisions log.
+
+Numbering starts at **F-01 / D-01** in this repository. Standing rules
+carried over from SynthMiner:
+
+- **Engine, graceloader or launcher problems: stop and ask.** No
+  workarounds in app code.
+- Builds run in the **foreground**, never backgrounded with sleep-polling.
+- **Commit and push only when the user asks.**
+- `make mode_badgelink` before any badgelink command: after the app exits
+  the badge is back in the launcher in debug mode (`303a:1001`), and a
+  BadgeLink command then fails for a reason that looks like a bug.
+- `make push` for code, `make install` only when assets actually changed
+  (~4 minutes for the 20 MB of music).
+- Tight timeouts; no routine BadgeLink downloads.
+
+---
+
+## Part L: source layout
+
+Three principles, in the same order as SynthMiner's:
+
+1. **Pure modules first.** Anything that can compile with a plain host `cc`
+   does: the orbital maths, the rocket maths, the maneuver planner. That is
+   what makes the host harness (Part H) possible, and it is the only way
+   orbital mechanics gets tested at all -- you cannot see a wrong
+   inclination by looking at a badge.
+2. **Data tables, not switch statements.** A new engine, tank size,
+   booster or capsule is a table row, never an edit in five files.
+3. **One directory per concern.**
+
+`*` marks what exists today; everything else is the plan.
+
+```
+main/
+* main.c                  app_main, se_app_config_t, the frame loop, the mode machine
+  sim/                    THE SKY -- pure, host-compilable
+    units.h               km / s / km^3 s^-2 everywhere (D-15)      (pure)
+    bodies.{c,h}          BODY[] registry: Bob, Cheese, Frodo       (pure)
+    kepler.{c,h}          state <-> elements, anomaly solver        (pure)
+    patches.{c,h}         SOI switching, the future-patch chain     (pure)
+    ephemeris.{c,h}       where Bob and Cheese are, now             (pure)
+    atmosphere.{c,h}      density, pressure, drag, terminal v       (pure)
+    surface.{c,h}         the ground: radius, landmarks, the pad    (pure)
+  rocket/                 THE VEHICLE -- pure
+    parts.{c,h}           PART[] registry: capsules, engines, tanks,
+                          RCS, boosters, legs, separators           (pure)
+    stack.{c,h}           a blueprint -> masses, CoM, CoT, inertia,
+                          drag centre, static margin                (pure)
+    budget.{c,h}          delta-v per stage, TWR, burn time         (pure)
+    heat.{c,h}            per-part heat load, failure, the split    (pure)
+    design.{c,h}          the blueprint <-> /sd/nisp/designs/*.nbp
+  flight/                 THE FLIGHT -- engine-facing
+    physics.{c,h}         rigid body: thrust, drag, torque, staging
+    control.{c,h}         manual / SAS / auto-guidance
+    warp.{c,h}            time factor, physics substeps
+    mission.{c,h}         launch, orbit, impact, touchdown, recovery
+  map/                    THE MAP -- mostly pure
+    orbit_draw.{c,h}      the conic as a polyline                   (pure)
+    node.{c,h}            a maneuver node: 6 axes, the burn vector (pure)
+    planner.{c,h}         ap / pe / inclination auto-planner        (pure)
+    map_view.{c,h}        the map screen: camera, bodies, node UI
+  engineering/            THE BUILD SCREEN
+    builder.{c,h}         focus, stage cursor, parameter ladders   (pure)
+    sheet.{c,h}           the blueprint: paper, grid, pencil strokes,
+                          dimension callouts, title block
+    notes.{c,h}           the post-it stat cards
+    icons.{c,h}           PART[] -> 32x32 pencil icons, same geometry
+                          as the sheet -- no image files
+  game/
+*   input.{c,h}           se_bindings, the look abstraction
+*   hud.{c,h}             the flight readouts (to be rewritten: orbital, not island)
+*   scene.{c,h}           the world as drawn (to be rewritten: bodies, not island)
+  ui/
+*   menu.{c,h}            title bar, slots, settings, pause
+*   settings.{c,h}        /sd/nisp/settings.txt
+*   title.{c,h}           the wordmark, the motto, the logo
+*   logo.{c,h}            the packed RGB565 logo blit
+  save/
+*   save.{c,h}            the three slots (to gain: mission + design state)
+  common/
+*   paths.h               /sd/nisp, /sd/nisp/saves, settings.txt
+*   rng.{c,h}             xorshift64*, hash2/hash3                  (pure)
+*   vfs_compat.{c,h}      the FatFs calls graceloader does not export
+  audio/
+*   music.{c,h}           the mixer, the per-context mp3 playlists
+                          (menu / engineering / space), the procedural fallback
+  testkit/
+*   devtest.{c,h}         perf / shots over the debug console
+*   profile.{c,h}         the phase timers
+*   showtime.{c,h}        the kit's clock
+
+tools/                    AT THE REPOSITORY ROOT, not under main/
+    nispcheck.c           THE HOST HARNESS (Part H): host cc, links only
+                          against main/sim and main/rocket
+```
+
+`main/game/scene.c` as it stands -- the heightmap island -- is not kept.
+Bob is a sphere (Part A). The island's *idea* survives as the spaceport:
+one marked point on Bob's equator with a pad, a launch mount and a
+runway-less nothing around it.
+
+---
+
+## Part O: the sky
+
+### O1 -- Units, because float32 has seven digits and this is a solar system
+
+The toolchain is `rv32imafc`: hardware **single**-precision float, no `d`
+extension. Doubles work (libgcc soft-float) but they are slow, and the
+frame budget is not a place to spend them.
+
+Metres are the problem, not the precision. Kerbin-scale distances are
+1e7 m; a float32 at 1e7 has ~1 m of resolution, which is exactly the
+resolution the orbit needs and therefore not enough margin anywhere.
+
+**Decision (D-15): the simulation is in kilometres, seconds and
+km^3 s^-2.** Bob's gravitational parameter becomes 3530.46 rather than
+3.5316e12, an orbit radius becomes 680 rather than 680000, and every
+number in the sim sits between 1e-3 and 1e5, where float32 is at its
+best: ~1e-7 relative, i.e. **centimetre-level on a 600 km orbit**.
+Time stays in seconds (float32 up to ~4e7 s covers a 427-day Bob year
+with ~4 s of resolution -- which is why the *clock* the HUD shows is
+kept as a double, as it already is in `testkit/showtime.h`).
+
+Rendering is the other direction, and it has its own rule
+(**D-16: camera-relative submission**). Every vertex the engine sees is
+`body_position - camera_position`, in metres, so the renderer never has
+to represent 1e7 and never loses the metre it needs to draw a rocket.
+The conversion happens in `game/scene.c`, once per body per frame.
+
+### O2 -- The three bodies
+
+Derived from Kerbal Space Program 1's published parameters, rounded to
+what a float32 sim can actually use, and cross-checked against the
+numbers players quote (a 80 km circular orbit at 2,278 m/s, Kerbin's
+stationary orbit at 2,863.9 km, its semi-synchronous orbit at 1,581.8 km
+and 1,272.3 m/s). Those four are the anchors `nispcheck` tests against
+(F-11).
+
+| | **Bob** (planet) | **Cheese** (moon) | **Frodo** (sun) |
+|---|---|---|---|
+| radius | 600 km | 200 km | 2,616 km |
+| mu (km^3/s^2) | 3530.46 | 65.136 | 1.17234e9 |
+| surface gravity | 9.81 m/s^2 | 1.628 m/s^2 | 171,300 m/s^2 |
+| escape velocity | 3,430 m/s | 807 m/s | 946.7 km/s |
+| SOI | 84,160 km | 2,400 km | -- (root) |
+| rotation period | 21,549.4 s (5:59:30) | tidally locked to Bob | -- |
+| atmosphere | top 70 km, p0 101.325 kPa | none | -- |
+| orbits | Frodo, a = 13,599,840 km | Bob, a = 12,000 km, i = 12 deg | -- |
+| period | 9,203,545 s (106.5 days = 427 Bob rotations) | 139,000 s (38.6 h) | -- |
+
+Bob's stationary orbit lands at 2,863.9 km altitude, Cheese orbits four
+times further out than that, and Cheese's Hill sphere (3,170 km) contains
+its SOI (2,400 km) -- the three numbers have to be consistent or the
+patched conics leak, and `nispcheck` asserts exactly that (F-11).
+
+Frodo's surface numbers are in the table for completeness and are used by
+nothing: KSP's sun is a 2,616 km radius ball of 1.76e28 kg, which is a
+body with a 946 km/s escape velocity, and the game never goes near its
+surface. What matters from Frodo is its `mu` and Bob's distance from it.
+
+Bodies are **data rows** (`sim/bodies.c`), so adding a second moon or a
+gas giant later is a row plus a texture, not a code change.
+
+### O3 -- Propagation: conics, not integration
+
+Numerical integration of an orbit is the easy way and the wrong way: it
+drifts, it needs a tiny dt near periapsis, and it makes warp 1000 cost a
+thousand steps. KSP does not integrate coasting either.
+
+**Coasting is analytic.** A state vector (r, v relative to the current
+reference body) is converted to orbital elements -- a, e, i, Omega,
+omega, M -- and the mean anomaly advances by n*dt exactly. Converting
+back needs Kepler's equation solved:
+
+- elliptic (e < 1): Newton-Raphson on E - e sin E = M, seeded from M,
+  4 iterations, and the seed matters more than the iteration count near
+  e -> 1.
+- hyperbolic (e > 1): Newton on H - e sinh H = M, seeded from the
+  asymptote. Escapes and intercepts are hyperbolic, so this is not an
+  edge case -- it is every SOI entry.
+- e within 1e-6 of 1: clamp. A parabolic orbit is a numerical accident
+  waiting to happen and is not worth representing.
+
+Elements are also what every readout wants: apoapsis, periapsis, period,
+inclination, eccentricity, time to apsis. They are derived on demand and
+cached per state, never stored as the truth (**D-17**: the state vector
+is the truth; elements are a view of it).
+
+**Powered flight is integrated.** While a stage is burning, or while
+inside an atmosphere, the sim integrates the state with velocity-Verlet
+at a fixed `dt_phys` (Part F), because thrust and drag are not conic.
+The moment the stage cuts off and the ship is above the atmosphere, the
+state is converted to elements and coasting becomes exact again.
+
+### O4 -- Patched conics
+
+One reference body at a time, exactly as KSP does:
+
+- outside Bob's SOI: Frodo-centric conic.
+- inside Bob's SOI: Bob-centric. Inside Cheese's: Cheese-centric.
+- a *patch* is (body, state at entry, conic, exit state at the SOI
+  boundary). The chain is capped at `NISP_PATCH_MAX` (4) and at a total
+  predicted time, because the map and the planner only ever need to see
+  a little way ahead, and an unbounded chain is how a 30 fps game
+  becomes a 3 fps game.
+
+SOI entry is found by intersecting the conic with the SOI sphere --
+solved by bisection on true anomaly over the arc, not by stepping.
+Exit likewise.
+
+**What is deliberately not here:** n-body gravity, sphere-of-influence
+wobble, the restricted three-body problem, atmospheric lift, body
+oblativity, and the Mun's `J2`. KSP 1 does not have them either, and
+their absence is the reason KSP 1's map mode is predictable enough to
+plan with.
+
+### O5 -- Where Bob and Cheese are
+
+Both orbits are circular and fixed in an inertial frame
+(`sim/ephemeris.c`): Bob goes around Frodo at 13,599,840 km, Cheese
+around Bob at 12,000 km with 12 deg inclination, tidally locked. No
+Keplerian elements for the bodies themselves, no eccentricity, no
+precession -- which means transfer windows are trivially computable and
+a `shots` test of a map screen is reproducible.
+
+The player's frame of reference is Bob: the map mode is Bob-centric by
+default, and Frodo only appears when the ship leaves Bob's SOI.
+
+---
+
+## Part A: ground, air, and getting off both
+
+### A1 -- Bob is a sphere
+
+Physics uses a perfect sphere of radius 600 km. Landing detection,
+ground collision, horizon, altitude and the map all follow from `|r|`
+against `R_body`, which is why the heightmap island goes away: a
+heightmap is a *rendering* detail and every physics question here wants
+a radius.
+
+Visual surface: a sphere tessellated in LOD rings (Part G) plus a small
+set of landmarks drawn as markers -- the **spaceport at 0N 0E** (the pad,
+the launch mount, the flag), Cheese's landing sites later. A heightmap
+for looks only may come back once landing is what people actually do;
+it is explicitly not in the first playable build (**D-18**).
+
+The pad is a point on the equator. At launch the ship's state is Bob's
+surface velocity there (174.9 m/s east, from the rotation) plus zero
+relative velocity -- which is why launches to the east are cheaper here
+exactly as they are in KSP, and why `nispcheck` checks it.
+
+### A2 -- Atmosphere
+
+One model, exponential, because it is the model every drag and heating
+question here needs and it costs three floating-point operations:
+
+```
+rho(h)  = 1.225 * exp(-h / 5600 m)      h above Bob's radius
+p(h)    = 101.325 kPa * exp(-h / 5600 m)
+```
+
+70 km is where it stops being anything. KSP 1's real model is a
+temperature-and-pressure curve rather than a single exponential; the
+difference is a few percent of drag in the regime that matters and is
+not worth a table (**D-19**). Cheese has none, which is what makes it a
+different kind of landing rather than a harder one.
+
+Drag is `0.5 * rho * v_rel^2 * Cd * A` against the whole rocket's
+reference area and Cd from the blueprint (a stack is a blunt cylinder:
+Cd ~ 0.6, a fairing-topped stack ~ 0.3). Terminal velocity, the parachute
+and the heat load all come out of the same two numbers, `rho` and
+`v_rel`.
+The `Cd * A` for the whole stack is not a second guess: it is the sum of the
+per-part `CdA` rows (Part V2), because Part A5 has to know not only how much
+drag there is but where it acts.
+
+Heating is one more reading of those two numbers, not a second model:
+Part A4 is the heat model, one accumulated quantity per part with a limit
+and a cooling term. It is still a rule rather than a thermal simulation
+(**D-20**), but it is per part, it accumulates, and a part that burns
+splits the stack (**D-30**..**D-33**).
+
+### A3 -- Landing and recovery
+
+Touchdown is relative speed under a threshold (soft: < 10 m/s on Bob,
+< 20 m/s on Cheese at any orientation the capsule tolerates), a
+parachute that deploys on a key and above a minimum dynamic pressure,
+and a wreck otherwise. A landed mission is written into the save slot as
+a completed mission with its mass, apoapsis and delta-v spent -- the
+only "score" the game has until the spec says otherwise.
+
+Those thresholds belong to the fragment that touches down, not to the body
+it lands on: a stage with a deployed leg set tolerates a faster and less
+vertical touchdown than one that lands on its engine bell (Part V7, D-38).
+On Bob the chute usually decides the number; on Cheese, where there is no
+chute to decide it, the legs are the landing system.
+
+### A4 -- Heating, and what burns
+
+Air does the heating, and one quantity does the air: the convective heat
+load on a part goes as `rho * v^3`, density from Part A2 and speed
+relative to the air. Reentry and a hard launch are the same equation read
+at different numbers, so there is no separate "reentry heating" model
+anywhere in the code (D-30).
+
+Exact values on this atmosphere (D-19), as the anchors the thresholds get
+tuned against:
+
+| situation | altitude | speed | `rho` kg/m^3 | `rho v^3` |
+|---|---|---|---|---|
+| entry, periapsis 25 km | 30 km | 2,458 m/s | 0.0058 | 8.6e7 |
+| entry, periapsis 25 km | 20 km | 2,458 m/s | 0.0344 | 5.1e8 |
+| a hard launch | 10 km | 1,500 m/s | 0.2054 | 6.9e8 |
+| a normal launch | 10 km | 1,200 m/s | 0.2054 | 3.5e8 |
+| low ascent | 4 km | 900 m/s | 0.5997 | 4.4e8 |
+
+The row that decides the model is the third one: **peak heating rate does
+not separate a hard launch from a reentry** (F-15). A fast ascent at 10 km
+is hotter per second than a reentry at 20 km. What separates them is
+duration -- a reentry sits in the 1e8 band for a couple of minutes, a
+launch crosses it in tens of seconds -- so heat must be an **accumulated
+quantity per part with a limit**, not a threshold on speed or dynamic
+pressure. A model that looked only at instantaneous `q` would either burn
+every rocket on the way up or let every rocket survive a sloppy reentry,
+and both are the bug this model has to avoid.
+
+Per part, one float, updated in the same tick as the drag:
+
+```
+flow     = -normalize(v_rel)                  where the air is coming from
+rate(p)  = K * rho * |v_rel|^3 * area(p) * expose(p) / capacity(p)
+temp(p) += (rate(p) - temp(p) / TAU) * dt     TAU ~ 30 s, parts cool
+fail(p)  when temp(p) >= 1
+```
+
+`expose(p)` is 1 for every part in the game, with exactly one exception:
+the capsule's integrated heat shield, worth about 0.1 when the shield
+faces the flow and worth nothing when it does not (D-31). There is no
+shadowing model in the first cut -- a stage behind another stage heats as
+if it were alone -- because the shield is the one thing the player has to
+think about, and a shadowing model would let them stop thinking about it.
+
+**The shield is a factor, not immunity** (D-36). The capsule is a part like
+every other part in the table: it has a `capacity` and a `limit`, and
+`temp >= 1` takes it out exactly as it takes out a stage. Shield-first at
+2,458 m/s through 20 km is 5.1e7 in `expose`-weighted `rho v^3` -- an order
+of magnitude below the unshielded number, and still enough to fill a
+capsule's capacity in a couple of minutes. So the tuning target for the
+`capacity` / `limit` columns is not "shield forward is safe", it is
+**"shield forward is survivable only if you arrived slower than orbital"**:
+a deorbit that has burned off a few hundred m/s and opens a chute at 3 km
+comes home, and a coasting reentry that lets the air do all the decelerating
+from 2,458 m/s does not, whichever way the capsule is pointing (F-16).
+
+A shield that degrades -- a `shield` value that falls as the capsule's
+`temp` rises, so a first reentry chars the pod and a second one does not --
+is the obvious next refinement and is deliberately not in the first cut. It
+softens the exact lesson the first cut exists to teach.
+
+Heating is still a rule and not a simulation (D-20 stands): one float per
+part, no temperature field, no conduction along the stack, no radiation
+view factors, no solar heating. What changed is what a failure *does* --
+Part F5.
+
+### A5 -- Aerodynamics, because a rocket is also a dart
+
+Part A2 answers how much the air pushes back. It does not answer the
+question the flight model has to answer every substep: **which way does the
+air want to turn this rocket?** That is the difference between a vehicle a
+player can fly and a vehicle that tumbles, and it is why the capsule's
+shield-first reentry attitude (Part A4) is an *outcome* of the model instead
+of a rule written into it.
+
+Per part there is one number, `CdA` (Part V2). The stack's drag is the sum
+of those rows, and so is the point that drag acts through:
+
+```
+x_CoM = sum(m_i * x_i) / sum(m_i)        centre of mass        (Part V4)
+x_CP  = sum(CdA_i * x_i) / sum(CdA_i)    drag centre
+SM    = x_CP - x_CoM                     static margin, metres along the axis
+```
+
+`x` is measured along the stack axis, outward from the capsule, so
+**positive static margin means the drag sits behind the mass**: a dart with
+fletching at the back, an arrow, a weathervane. Negative margin means the
+mass is behind the drag and the air will swing the tail around until the
+vehicle flies the other way round. Margin near zero is mushy -- the rocket
+neither seeks the wind nor flees it, and SAS spends its authority holding an
+attitude the air has no opinion about.
+
+Torque, at angle of attack `alpha` to the relative wind:
+
+```
+q        = 0.5 * rho * |v_rel|^2
+N_i      = q * CdA_i * sin(alpha)             sideways force on part i
+tau_aero = -sum( N_i * (x_i - x_CoM) )
+         = -q * sin(alpha) * CdA_total * SM   restoring when SM > 0
+```
+
+divided by the transverse moment of inertia Part V4 already computes. It is
+zero above the atmosphere and dominant inside it, and it is one equation
+across the whole flight -- from a chute descent at ~200 Pa of dynamic
+pressure to a fast low ascent at ~1.5e5 Pa, three orders of magnitude of
+`q` and no change in the model.
+
+**The worked case: the burnt-out stage is the fletching.** A 1.25 m stack,
+`x` measured from the nose, capsule 1.0 t with `CdA` 1.0 m^2 spanning
+0-2 m, a stage with `CdA` 6.0 m^2 spanning 2-12 m:
+
+| stack | CoM | drag centre | static margin | what the air does |
+|---|---|---|---|---|
+| stage loaded, 8.0 t | 6.33 m | 6.14 m | **-0.19 m** | marginally unstable; SAS earns its keep |
+| stage burnt out, 0.8 t | 3.67 m | 6.14 m | **+2.47 m** | a dart: capsule leads, empty stage trails |
+
+Nothing in the geometry changed between the two rows -- the drag centre is
+the same 6.14 m both times. What moved is the mass: burning 7.2 t out of the
+tail walks the CoM forward by 2.7 m and flips the sign of the static margin.
+So the situation a player creates by forgetting to stage -- heavy capsule up
+front, a long empty booster still bolted on behind, light end facing away
+from the airstream -- *is* the stable configuration, and the air will hold
+it nose-first for the whole descent. No special case in the code has to
+notice that situation; it is what the two sums already say.
+
+Which is the trap, not the rescue. Held nose-first at reentry speed, the
+capsule stays pointed into the heat for the entire descent, and the shield
+is a factor of about 0.1 rather than immunity (D-36). A dart that comes home
+at 2,400 m/s is a dart that comes home very hot, and it is the capsule that
+is at the front of it. Surviving means having slowed down before the air did
+the slowing -- a retro burn, a high periapsis, a chute at 3 km -- and that
+judgement is the player's, which is exactly why Part B4 refuses to print it
+(D-37).
+
+**What is deliberately not here:** no fins, no airbrakes, no body flaps, no
+per-part `Cd` varying with Mach or Reynolds number, no induced drag beyond
+the `sin(alpha)` term, no wave drag, no cross-axis coupling, and no
+aerodynamic heating beyond Part A4's `rho v^3`. Fins in particular are not
+parts in this game -- the legend in Part B3 has no such row -- so the
+stability a stack has is the stability its mass distribution and drag areas
+give it, which is the thing the blueprint already draws. Giving the player a
+fin part would mean giving Engineering a stability answer, and D-37 says
+Engineering does not get one.
+
+The HUD carries the answer instead (step 6.6): the static margin as a signed
+number in metres, so the player can watch it cross zero as a stage empties
+and jump as stages separate. It is the only aerodynamic number on screen,
+and it is the one that explains why the rocket started doing what it did.
+
+---
+
+## Part V: the vehicle
+
+### V1 -- A blueprint, not an assembly
+
+The player cannot drag parts around. A rocket is a **stack described by
+numbers**, built top-down:
+
+```
+capsule            always exactly one, always on top
+  stage 1          the uppermost engine stage
+  stage 2
+  ...
+  stage N          the bottom stage
+each stage: diameter, length, engine type, engine count, RCS?,
+            side boosters (0 / 2 / 4) and their size,
+            landing legs (none / 3 / 4 / 6)
+```
+
+Stage separators are implicit: a stage boundary *is* a separator, and it
+exists whether or not the player thought about it (**D-21**). Side
+boosters belong to the stage they hang on: they ignite with that stage's
+main engine and separate when they themselves are empty, not when the
+stage is.
+
+Stages are numbered from the top (stage 1 fires first), and staging is
+one key press that fires the next stage down -- the KSP order, so that
+anyone arriving from KSP already knows the controls.
+
+### V2 -- What a stage is made of
+
+A stage is a cylinder of propellant with engines bolted to its bottom:
+
+```
+propellant mass = pi (d/2)^2 * L * rho_prop        rho_prop = 400 kg/m^3
+tank dry mass   = 0.08 * propellant mass           (a fixed structural fraction)
+engine mass     = table row * count
+RCS mass        = table row, when on
+booster mass    = the same cylinder maths, per booster
+leg mass        = table row * count (3 / 4 / 6)
+separator mass  = table row, per boundary
+```
+
+Every part row also carries the three numbers the heat model needs
+(Part A4) and the one number the aero torque needs (Part V4):
+
+| field | meaning |
+|---|---|
+| `capacity` | how much heat the part can absorb before it fails |
+| `limit` | its failure threshold, normalised so `temp >= 1` is always "this part is gone" |
+| `shield` | 0 for everything except the capsule, whose shield is ~0.9 effective when it faces the flow |
+| `CdA` | drag area, used for drag, for aero torque, and for the parachute check in Part A3 |
+
+These are tuning targets like the engine table is: `nispcheck` case 9 is
+what sets them, because "a normal launch survives, a bad reentry does not"
+is a property of these four columns and nothing else.
+
+Diameters are a fixed ladder (1.25 / 1.875 / 2.5 / 3.75 m) and lengths
+step 0.625 m to 10 m, so the editor is a ladder of choices rather than a
+numeric field -- on a keyboard with one alphabet, "pick the next size"
+is a nicer interaction than typing 2.37.
+
+A stage may have **zero engines**: a cargo section, a fuel-only stage or a
+diameter adapter is still a stage -- it has mass, volume and a separator
+above it, it just adds no thrust. That is what the legend's cargo row
+inserts (Part B3), and `rocket/stack` treats it as any other stage so no
+code path has to special-case it.
+
+The engine table (first cut, four rows, all Kerbal-shaped):
+
+| engine | thrust | Isp | dry mass | role |
+|---|---|---|---|---|
+| Flea | 30 kN | 240 s | 0.15 t | upper stage, small |
+| Relion | 60 kN | 320 s | 0.30 t | vacuum upper stage |
+| Skipper | 180 kN | 270 s | 0.90 t | first stage |
+| Mainsail | 300 kN | 290 s | 1.20 t | heavy first stage |
+| Booster (solid) | 400 kN | 180 s | sized | side boosters only |
+
+These are tuning targets, not scripture; `budget.{c,h}` computes what a
+stack can actually do and the table gets adjusted by the numbers, not by
+feeling (F-12).
+
+### V3 -- One rigid body
+
+**The whole rocket is one body** (D-22). No joints, no springs, no
+wobble, no part-level contacts. The state is:
+
+```
+r, v            centre of mass, in the current reference body's frame
+q               attitude (unit quaternion)
+omega           angular velocity
+m               total mass
+```
+
+and the only things that change them are forces and torques applied to
+the whole thing. This is the decision that makes the physics fit on the
+badge: N parts become 1 body, and the only per-part work left is summing
+masses and thrust vectors, which is O(parts) once per physics tick and
+parts is under 30.
+
+What that buys, and what it costs:
+
+- **Buys:** no constraint solver, no contact pairs, no joint breakage,
+  no fixed-step stability worries about stiff connections, no per-part
+  collision. Decoupling is a mass and CoM change, not an impulse.
+- **Costs:** no failure from loads, no part collisions, no docking physics,
+  no leg that crushes or snaps on contact. Landing legs exist as a touchdown
+  rating (Part V7, D-38), not as contact mechanics. All of those are out of
+  scope for "build rockets that fly", and each one is a separate future
+  document rather than a hidden hole here.
+- **The one per-part state that is not a sum: heat.** Each part carries one
+  float (Part A4), because "which part burns" is a question a whole-body model
+  cannot answer, and it is the only genuinely per-part quantity in the game.
+  When a part fails the body is cut at it (Part F5), which changes *which
+  parts are in the sums* -- CoM, CoT, mass, inertia -- and not the physics.
+
+### V4 -- CoM, CoT, and the torque that comes from them being different
+
+Everything is measured along the stack axis, which is a 1-D problem:
+
+```
+CoM = sum(m_i * x_i) / sum(m_i)          x_i along the axis
+CoT = sum(T_i * x_i) / sum(T_i)          only over engines IGNITING now
+x_CP = sum(CdA_i * x_i) / sum(CdA_i)     drag centre (Part A5)
+```
+
+Both are recomputed every physics tick, because fuel burns and the
+numbers move: a stage empties from the bottom of its own tank and the
+CoM walks up the rocket. That is cheap (a pass over <= 30 rows) and it
+is the whole reason a real KSP-style rocket here behaves like one --
+a half-empty first stage is tail-heavy and wants to flip, exactly as it
+should.
+
+Torque:
+
+- **thrust torque** = `(CoT - CoM) x F` -- the reason rockets need fins
+  or gimbals, and the reason a badly stacked rocket is unflyable in
+  manual mode.
+- **aero torque** = dynamic pressure x reference area x lever arm,
+  = `q * CdA_total * SM * sin(alpha)` (Part A5). It weathervanes the rocket
+  into the relative wind when the static margin `SM` is positive and flips it
+  when `SM` is negative. Zero above the atmosphere, dominant in it.
+- **RCS torque** = a table torque budget per module, applied on demand
+  by SAS or the player.
+- **SAS torque** = a critically damped controller on the attitude error
+  (Part F), which is what "stability assist" means.
+
+Moment of inertia is computed from the same stack as a sum of solid
+cylinders about the two transverse axes, recomputed when a stage
+separates and cached otherwise.
+
+**Why a lone capsule flies shield-first.** The aero torque above is a
+weathervane, and a weathervane is stable when its drag centre sits
+downstream of its CoM. The capsule is built so that is true: its dry mass
+is biased toward the shield end (the shield and the chute are the heavy
+things in it) while its drag centre sits near its geometric middle. So a
+capsule with nothing else attached turns itself shield-into-the-wind
+because of drag, not because a rule says it may (D-31).
+
+Attach a loaded stage and the stack's CoM walks down toward the propellant
+while its drag centre stays near the middle of the whole stack -- and the
+same torque now holds the rocket the other way round, engines into the
+wind, capsule shield facing away. That is not a special case bolted onto
+the model; it is the model, and it is the difference between a reentry
+that lands and one that loses the pod.
+
+The two sums say the opposite thing once that stage is empty, and that is the
+case flight cares about most: with the propellant gone the CoM walks back up
+toward the capsule, the drag centre does not move at all, and the stack has
+become a dart. Part A5's worked table is that arithmetic end to end.
+
+### V5 -- Delta-v, TWR, burn time
+
+`rocket/budget.{c,h}` answers, per stage and for the whole stack:
+
+```
+delta-v_i   = Isp_i * g0 * ln(m_i / m_{i+1})        (Kostya's rocket equation)
+TWR_i       = T_i / (m_i * g0)
+burn_i      = propellant_i / (T_i / (Isp_i * g0))
+```
+
+Engineering shows all three per stage and the total, because that is the
+entire feedback loop the builder has: it is the number that tells you
+whether your design can do the mission you are about to attempt, and it
+is the number the maneuver planner later compares against (Part M).
+
+`nispcheck` verifies the arithmetic against hand-computed stacks (F-12),
+including the case that catches every implementation: a stage whose
+TWR is under 1 on Bob cannot leave the ground, and a stack with a good
+total delta-v but a first stage under 1.0 TWR is a rocket that never
+gets anywhere.
+
+### V6 -- Designs are files
+
+`/sd/nisp/designs/<name>.nbp`, one blueprint per file, text with the
+same tagged-field approach SynthMiner uses for save data: forward
+compatible, unknown fields ignored, hand-editable on the card. A design
+is **not** in a save slot -- the same rocket should be launchable from
+any slot, and a slot should be able to have flown several.
+
+**A design must be named before it can be launched** (the user's rule):
+Engineering's Launch item is disabled while the design is unnamed, and the
+name is what the mission log and the save record.
+
+### V7 -- Landing legs
+
+Legs are a **stage parameter**, in exactly the sense RCS and side boosters
+are (D-26, extended by D-38): a stage either has a leg set or it does not,
+there is no attach interaction, and the ladder row is
+`legs: none / 3 / 4 / 6`. They are not a legend row (Part B3) for the same
+reason RCS is not one.
+
+**Why they exist at all: Cheese.** Bob has an atmosphere, so a capsule can
+come home under a chute and legs are a nicety that softens the last metre.
+Cheese has none (Part A2), so on a Cheese mission the only landing system is
+the stack's own thrust and whatever it happens to touch down on. Without legs
+that means landing on an engine bell at single-digit metres per second and
+hoping, which is not a feature, it is an absence. Legs are what makes the
+second body in the game actually reachable.
+
+What a leg set is, as data:
+
+| field | meaning |
+|---|---|
+| count | 3 / 4 / 6 -- the ladder, chosen to suit the stage's diameter |
+| mass | a table row per leg, so a 6-leg 3.75 m stage carries more of them |
+| `rated_v` | the touchdown speed this stage survives, metres per second |
+| `rated_tilt` | how far off vertical the contact may be before it is a wreck |
+| deployed | stowed or deployed; deployment is a key, and deploying late is a wreck |
+
+A leg set changes which of Part A3's touchdown numbers apply to the fragment
+that lands, and that is all it does. There is no leg crush, no leg break, no
+spring absorbing an impact, no per-leg load: the rigid body (Part V3) still
+has one body and one touchdown test, and the leg row says which thresholds
+that test uses. "Landing legs as physics" stays out of scope (Part D);
+"landing legs as a rating" is what is in.
+
+**What they cost, which is the whole trade.** Legs go on the stage that has
+to survive, which is usually the last stage, which is the stage whose delta-v
+the player wanted for something else. A 4-leg set is on the order of a tonne,
+and a tonne bolted to the last stage is a large slice of that stage's delta-v:
+an 8 t upper stage with 6 t of propellant at Isp 320 is 4,350 m/s, and the
+same stage carrying a tonne of legs is 3,450 m/s. The Engineering decision
+legs create is the real one -- a rocket that can land on Cheese is a rocket
+that carried a tonne of landing hardware to Cheese -- and the delta-v card is
+where the player sees the price before paying it.
+
+**Legs and the air.** Deployed legs put drag area at the very back of the
+fragment, which moves the drag centre aft and therefore *increases* the static
+margin (Part A5): a fragment with its legs out flies more like a dart than the
+same fragment with them stowed. That is not a bonus to be farmed -- it can be
+exactly the wrong thing, because a dart held shield-first at orbital speed is
+the configuration Part A4 says will cook the capsule. It is modelled rather
+than special-cased, which is the point of having a static margin at all.
+
+**Legs and the drawing.** On the sheet a deployed set is three or four pencil
+strokes splayed outward from the bottom of the stage; a stowed set is the same
+strokes folded against the hull. Same geometry as the legend icon, same
+renderer as the thumbnail (Part B5). It is the one stage parameter that is
+visible in the drawing rather than only in a dimension callout, which is worth
+having for the parameter that decides whether the picture ends in a landing or
+a crater.
+
+**Legs and the notes.** The selected-stage card gains `legs: 4, deployed` and
+the rated touchdown speed, because a part's rating is data and data belongs on
+a card (D-37). What the notes never do is promise that the flight will arrive
+inside the rating.
+
+---
+
+## Part B: Engineering (the blueprint designer)
+
+Engineering is not an assembly building and it is not a menu. It is
+a **drawing sheet** (D-25): blue paper, white pencil technical drawing, a
+legend of parts down the left, the rocket in the middle, and a few
+stuck-on notes on the right that say whether any of it will fly.
+
+```
+ ┌──────────────┬─────────────────────────────────┬───────────────┐
+ │ PARTS        │ the blueprint                   │ NOTES         │
+ │ the legend   │ blue paper, white pencil        │ post-it cards │
+ │ scrollable   │ scroll up/down, auto-fit        │ selected stage│
+ │ part icons   │ dimension callouts              │ whole rocket  │
+ │ 32x32 pencil │ title block, bottom right       │ 168+424+208 px│
+ │ 168 px       │ 424 px                          │ 208 px        │
+ └──────────────┴─────────────────────────────────┴───────────────┘
+```
+
+800 logical px wide, 480 tall: 168 + 424 + 208. The middle column *is*
+the screen; the two flanks are margins. Nothing here is a 3-D scene --
+the whole screen is 2-D direct-565 drawing plus Hershey text (F-13), so
+it costs no scene triangles, no scene lines, no camera and no PPA
+upscale.
+
+### B1 -- The sheet: paper, grid, pencil
+
+- **Paper** is the frame clear: `pax_background(fb, BLUEPRINT_ARGB)`, a
+  saturated drafting blue. It is the same CPU clear the island already
+  pays for, so the paper is free; the *look* comes from what is drawn on
+  it.
+- **Grid**: a faint engineering grid, minor every 20 px and major every
+  100 px, in a dimmer tint than the strokes -- about 45 + 9 segments for
+  the whole sheet. It sells "drawing" for essentially nothing, and it
+  gives the eye a scale to read the rocket against.
+- **Pencil**: white-ish (`0xE8EEF5`, not pure white -- pure white on blue
+  reads as a wireframe, off-white reads as a pencil) 1 px
+  `direct_565_line` strokes. Optional sketch feel: a second stroke offset
+  by one pixel at ~60 % brightness, which doubles the segment count and
+  is the kind of thing to add only after 4.8 has measured the sheet.
+- **Dimension callouts**: diameter arrows left of the stack, length
+  arrows right, with extension lines, arrowheads and Hershey numbers
+  ("2.5 m", "18 m"). These are the blueprint's *look* and its *editor*
+  at the same time: the number you are changing with the ladder is the
+  number drawn on the drawing, which is why the sheet replaces the
+  separate "preview" the first draft of this plan asked for.
+- **Title block**, bottom right of the sheet, like a real drawing:
+  design name, revision, stage count, scale (`1:250`). It is also where
+  the unnamed state is visible, so "Launch is disabled until named"
+  (D-11) has somewhere to show itself.
+- **Scale and scroll**: px-per-metre is chosen to fit the whole stack in
+  the middle column, clamped so a 2 m capsule is never 3 px; past the
+  clamp the sheet scrolls with the stage cursor, and the title block
+  reports the current scale.
+
+### B2 -- Keyboard-only, and how to still do it
+
+No mouse, so the screen has a **focus ring** rather than hit targets:
+PARTS ⇄ BLUEPRINT. NOTES is read-only and never takes focus. TAB (or the
+shoulder button) cycles.
+
+```
+BLUEPRINT focus   up/down     stage cursor; the sheet scrolls to keep it visible
+                  Enter       open the selected stage's parameter editor
+                  add / del   insert a stage below the cursor / remove it
+PARTS focus       up/down     part cursor in the legend, which scrolls
+                  Enter       insert that part as a stage below the cursor
+PARAMS (Enter)    up/down     pick the parameter row
+                  left/right  step that parameter's ladder
+```
+
+Editing a parameter is a **ladder**, never a numeric field: diameters
+step through the four sizes, lengths through their steps, engines through
+the PART[] table, counts through 1..N, and RCS, side boosters and the leg
+set toggle through their own ladders. The
+only typed text in the whole screen is the design name, and that text entry
+already exists in the menu code (the world-name field).
+
+There is no "fuel" knob: **fuel is the size of the stage** (D-10) --
+length x diameter *is* the propellant load. That is what makes a ladder
+work on a keyboard, and what makes the drawing honest: the sheet redraws
+on the frame the ladder steps, so changing a diameter *is* watching the
+rocket get fatter. The editor and the picture are the same object, which
+is the whole argument for the blueprint layout.
+
+### B3 -- What the legend contains
+
+The legend is the visible face of the PART[] registry (Part V2), and it
+lists **stage types**, not attachments:
+
+| legend row | what it inserts |
+|---|---|
+| Command pod | the top of every stack; always present, never removable, not in the scrollable list |
+| Main stage | engine + propellant: the workhorse |
+| Upper stage | a vacuum-optimised engine, thin walls, small diameter |
+| Booster stage | solid: heavy thrust, no throttle, burns out on its own |
+| Cargo / adapter section | no engine: payload, fuel-only tank, or a diameter adapter |
+
+RCS, side boosters and landing legs are **stage parameters**, not legend
+rows (D-26, extended by D-38).
+They are properties of a stage -- a stage either has RCS pods or does not,
+either has N boosters or does not, either has a leg set or does not -- and
+putting them in the legend would mean a keyboard dance to attach one to a
+stage, which is exactly the mouse-shaped interaction this screen cannot have.
+Keeping them as parameters also keeps the legend five rows long, which fits
+without scrolling for the first build and scrolls the same way later.
+
+Each legend row carries a 32x32 pencil icon, and the icon is the part's
+own geometry drawn at a fixed scale by the same code that draws the
+sheet (Part V2's table, Part B1's strokes). No PNGs, no sprite sheets,
+no asset pipeline: the legend is a legend because it is drawn in the same
+language as the drawing.
+
+### B4 -- The post-it notes
+
+Three to five cards on the right, manila / pink / yellow fills with a
+darker corner so they read as stuck-on paper against the drafting sheet,
+each tilted a degree or two. They are the only warm colour on a blue
+screen, which is deliberate: the sheet is the work, the notes are the
+verdict.
+
+| card | contents |
+|---|---|
+| Selected stage | delta-v, TWR at Bob's surface, burn time, wet and dry mass, propellant kg, RCS yes/no, booster count, legs and their rated touchdown speed |
+| Whole rocket | total mass, total delta-v, liftoff TWR, stage count, part count |
+| Warning (conditional) | appears only when triggered: first-stage TWR < 1 at the pad; total delta-v under the reach-orbit line; a stage that outlives its own stage separator |
+
+Notes are recomputed from `rocket/budget` **on every edit**, not on a
+timer and not on save. A post-it that updates when you press a key is
+the feedback loop the builder runs on; F-12's trap -- plenty of delta-v,
+a first stage that cannot lift -- is worth a card of its own for exactly
+that reason.
+
+The reach-orbit line is a measured number, not a guess: the ideal
+impulsive cost from the pad to a 100 km circular orbit is **2,605 m/s**
+(2,517 to raise the apoapsis, 88 to circularise, before the 174.9 m/s of
+rotational help and before gravity and drag losses). The card's threshold
+is the number block 6 measures in flight, not the ideal one.
+
+What the notes do **not** do: predict survivability (D-37). Whether a design
+comes home is a function of its mass distribution as much as its parts
+(Parts A5, V4), of how fast it arrives, and of whether the player staged when
+the stage was empty. That is the player's judgement, and it is not a number
+that can be printed here. A "will this survive reentry" card would be read as
+a guarantee, and the game would be blamed every time the guarantee was wrong
+for a reason the card could not see.
+
+The line between the two kinds of number is worth drawing exactly, because it
+is what the notes *may* say. A **part's rating** is data and belongs on a
+card: a shield's factor, a leg set's rated touchdown speed, an engine's
+thrust and Isp, a stage's delta-v. **What the assembled rocket does with those
+ratings on a trajectory the player is flying** is not data and does not
+appear: not a stability verdict, not a heat verdict, not a survivability
+verdict. Engineering says what your parts are rated for. It does not say that
+you will stay inside the rating -- the HUD does that, in flight, where the
+number can still be acted on (step 6.6).
+
+### B5 -- One renderer, three sizes
+
+`engineering/sheet` draws a stack into a rectangle at a given scale. That is the
+only drawing function, and it is used for the Engineering sheet, the design-list
+thumbnail in the Spaceport (Part N1), and the pre-launch confirmation. A
+thumbnail is the same call with a smaller rectangle, so a design looks
+identical everywhere it appears -- and the designs list becomes a wall of
+little blueprints, which is the point of calling them blueprints.
+
+### B6 -- What it costs
+
+Engineering is the cheapest screen this game will have, and it should be
+measured like one: `perf scene=engineering`, target **>= 40 fps**, with the cost
+expected to be a few hundred `direct_565_line` calls plus text. Two
+consequences worth stating now:
+
+- **Half resolution does not apply here.** Nothing in Engineering goes
+  through the 3-D pipeline or the PPA upscale, so the Graphics setting
+  has nothing to halve (F-03 is the same lesson from the other side).
+- **The sheet is not where the frame budget goes.** Flight and map are
+  (Part G). If Engineering is ever slow, the suspicion falls on the drawing
+  being redrawn per frame instead of cached into a layer, and 4.8 is what
+  decides whether caching is needed at all.
+- **Its music is not this screen's cost.** Engineering loops `sneaky_adventure.mp3`
+  (Part N4), and the decoder is the engine's own task on core 1 (F-14), so the
+  track costs the frame loop nothing. Building a rocket is a long session and it
+  should sound like one.
+
+### B7 -- What survives from the first draft
+
+Save / Save as / Load design / Launch stay as they were, and the rule
+that the preview was there to serve stays too: the drawing is drawn from
+the same stack maths the physics uses (Part V3), so it cannot lie about
+mass, height or what is tail-heavy. What changed is that the stage list,
+the readouts and the preview collapsed into one thing -- a blueprint you
+edit in place.
+
+---
+
+## Part F: flight
+
+### F1 -- The physics tick
+
+Fixed `dt_phys = 0.02 s` (50 Hz) at warp 1. Warp multiplies simulated
+time, not step size: at warp `w` the frame advances `w * dt_frame` of
+simulated time, which is covered by
+
+- **coasting above the atmosphere:** analytic propagation, one call,
+  whatever the warp (Part O3). Warp 1000 costs the same as warp 1.
+- **thrusting or in atmosphere:** `ceil(w * dt_frame / dt_phys)`
+  substeps, capped at `NISP_SUBSTEP_MAX` (200). The cap is what keeps a
+  warp-1000 burn from eating a frame, and when the cap binds the sim
+  drops the effective warp rather than the accuracy -- visible, honest,
+  and better than a wrong orbit.
+
+### F2 -- Control modes
+
+| mode | what it does | how it is entered |
+|---|---|---|
+| **manual** | the player's keys are torque commands; nothing is stabilised | default |
+| **SAS** (stability assist) | damped attitude hold: kills rotation, holds the current heading, and can lock to prograde / retrograde / normal / radial | `S` toggles, `K`/`H` pick the reference direction |
+| **auto-guidance** | steers to the next maneuver node's burn vector, warps to the node, ignites, cuts off when the node's delta-v is spent | chosen from the map screen |
+
+SAS is a PD controller on the attitude error with the RCS torque budget
+as its authority limit; when the budget is exhausted the ship simply
+stops responding, which is the honest failure mode and the one that
+teaches the player to put RCS on a stage.
+
+**The controlled body is always the capsule** (D-33). Keys, SAS, throttle,
+staging and auto-guidance all act on whichever fragment contains the
+capsule, and on nothing else. Debris is not controllable, has no SAS, and
+is not what the HUD is showing -- but it is still simulated, still drawn,
+and still visible in map mode, because watching your spent first stage
+fall away below you is the feedback that teaches staging.
+
+### F3 -- Staging, decoupling, boosters
+
+One key advances to the next stage. On a stage boundary:
+
+1. the current stage's engines stop and its propellant is discarded with it,
+2. the separator fires (a mass change and a small separation impulse so
+   the spent stage does not sit inside the live one),
+3. mass, CoM, CoT, inertia and the drag centre are recomputed -- which is
+   also where the static margin jumps, sometimes across zero (Part A5),
+4. side boosters that are already empty have separated earlier, on their
+   own burn-out, not on the stage boundary.
+
+### F4 -- Warp
+
+Warp levels `1, 5, 10, 100, 1000`, and 10,000 only above 100 km altitude
+and outside any atmosphere. Warp is refused while thrusting below the
+substep cap's comfort zone, and refused inside an atmosphere above warp
+10 -- the two places where a big dt is a wrong trajectory rather than a
+slow one.
+
+### F5 -- Failure: a part burns, and the stack splits
+
+When a part's heat reaches its limit, **that part goes** (D-32). Not the
+rocket, not the stage -- the part, and the stack is cut at it:
+
+```
+capsule | sep | stage 1 | sep | stage 2 | sep | stage 3   stage 2 fails
+        ->  capsule | sep | stage 1        (controllable: has the capsule)
+            stage 3                        (debris: ballistic, still heated)
+```
+
+- **A fragment is a range in the same array.** A stack is already a list of
+  parts along one axis (Part V2), so a fragment is `(first, last)` into it.
+  Mass, CoM, CoT and inertia come from the same code that already recomputes
+  them at a stage boundary (Part V4) -- a burn-through is a staging event the
+  player did not ask for, and it reuses the staging path rather than adding a
+  second one.
+  The drag centre comes from the same pass, so every fragment has its own
+  static margin (Part A5): the shed stage flies like the dart it has become,
+  and the capsule fragment flies like whatever its own mass distribution says.
+- **The failed part is gone, its neighbours are not spared.** The fragments
+  are now exposed on a fresh face, so they keep heating at the new frontal
+  area. A rocket that starts breaking tends to finish breaking, which is the
+  right behaviour and needs no extra rule.
+- **The capsule fragment is the mission.** It has the heat shield, the
+  parachute and the control, so a mission that loses everything below the
+  capsule is a survivable mission that lands under chute -- smaller, sadder,
+  and still a landing.
+- **The capsule itself failing ends the mission** where it happens, in the
+  air, at whatever speed and altitude. That is a wreck in the save slot with
+  the altitude it happened at, because "you lost it at 22 km doing 2,400 m/s"
+  is the lesson.
+- **Debris is capped** at `NISP_DEBRIS_MAX` (8) bodies, each a point mass with
+  the same heat model, each allowed to fail once. The cap is a frame-budget
+  constraint (Part G), not a physics one, and when it binds the oldest debris
+  is dropped rather than the sim slowing down.
+- **Nothing fails for reasons other than heat** in this plan. Engines do not
+  overheat from burning, parts do not break on contact, and a stage does not
+  tear itself off from too much thrust (Part D's out-of-scope list). One
+  failure cause is a rule a player can learn; four is a simulation.
+
+---
+
+## Part M: the map and the maneuver planner
+
+### M1 -- The map screen
+
+A 2-D view of the current SOI's plane: Bob's disc, Cheese's disc and its
+orbit, the ship, the current conic drawn as a polyline (sampled from the
+elements, not integrated -- 128 samples per orbit is plenty and it is
+exact), the predicted path through the patch chain beyond the SOI,
+apoapsis and periapsis markers, and the node.
+
+TAB toggles flight <-> map at any time; the map is not a pause, the ship
+keeps flying while it is up (that is what makes "warp to the node"
+possible).
+
+Line budget: `SE_SCENE_LINE_CAP` is 4,096. The orbit polyline is 128,
+Cheese's orbit 128, the predicted path 256, node markers and body
+outlines a few hundred. There is room for everything here and this is
+one of the few places in the project where the engine's cap is not the
+constraint (Part G).
+
+### M2 -- Manual nodes: the six axes
+
+A node is a delta-v vector applied at a point on the current orbit, in
+the orbital frame:
+
+```
+prograde / retrograde   along the velocity
+radial in / out         perpendicular, in the orbital plane
+normal + / -            perpendicular to the orbital plane
+time - / +              slide the node along the orbit
+```
+
+Six axes, six keys, each key nudging one component by a step (and a
+modifier for a bigger step). The node's vector is drawn as an arrow at
+the node, and the resulting predicted orbit is drawn live, so the
+editing is visible rather than arithmetic.
+
+The resulting burn is then *executed* by the flight computer: warp to
+the node, turn to the vector (or let auto-guidance do it), burn, cut off
+when the planned delta-v has been delivered.
+
+### M3 -- The auto-planner
+
+TAB switches to the planner. The player picks a maneuver type and types
+the target; the planner produces the same node object a human would have
+dialed in, with the time and the vector chosen properly:
+
+| maneuver | burn point | delta-v |
+|---|---|---|
+| **change apoapsis** | periapsis, prograde (raise) or the apsis that is nearest the target (lower) | vis-viva: `v = sqrt(mu (2/r - 1/a))`, `a = (r_p + r_a')/2` |
+| **change periapsis** | apoapsis, retrograde (lower) or prograde (raise) | same |
+| **change inclination** | the ascending or descending node, whichever is sooner | `2 v sin(di/2)` at the node, normal to the plane |
+
+and each one reports **time to burn**, **delta-v required**, and whether
+the current stage's remaining delta-v covers it. A maneuver the rocket
+cannot do is refused with the number that says so, not attempted.
+
+Transfer / intercept ("get to Cheese") is the next planner item and is
+explicitly **not** in this plan's scope: it needs a phasing-angle
+calculation and a targeting UI, and it is much better designed after the
+three simple ones have been flown.
+
+### M4 -- What the planner must never do
+
+It must not silently change the orbit while the player is looking at a
+predicted one, it must not plan a burn inside an atmosphere or below the
+surface, and it must not plan a burn at a point the rocket cannot reach
+because the orbit will have been changed by an earlier burn. Every
+planned node is validated against the *current* conic before it is
+offered, and `nispcheck` has a case for each refusal.
+
+---
+
+## Part N: menus, settings, saves
+
+### N1 -- The menu tree, and where the game hangs off it
+
+The shape is already the SynthMiner shape and is kept:
+
+```
+title bar   Play / Settings / Quit
+  Play      the three slots
+    a world   Play / Rename / Delete        -> becomes the Spaceport hub
+  Settings  Controls / Graphics / Audio / Display / Livestream
+pause       Resume / Save / Settings / Save and quit / Quit
+```
+
+The one change the game needs is what happens when a slot is opened. A
+slot is not a world you walk around in; it is a **mission**, so opening
+one opens the Spaceport:
+
+```
+spaceport   Continue mission...     (which mission, when the slot has more than one)
+            Build a rocket          (Engineering, on an unnamed working design)
+            Launch...               (which saved design)
+            Designs...              (open / rename / delete a design)
+            Rename / Delete         (the slot itself)
+```
+
+The hub lists **functions, never functions-with-arguments** (D-24). A row
+that needs a parameter opens a picker for it -- "Launch..." then asks
+*which design*, "Continue mission..." then asks *which mission* when the
+slot has more than one in progress. A row whose parameter is already
+unambiguous skips the picker and goes straight through. So the hub is a
+fixed-length menu no matter how many designs or missions the player has,
+which is what keeps it drawable with the same fixed-height rows as every
+other screen.
+
+Everything else -- the pause menu, the settings screens, the livestream
+being a *setting* and never a title-bar item -- stays as it is (D-05).
+
+### N2 -- Settings parity with SynthMiner
+
+Same file (`/sd/nisp/settings.txt`), same `key=value` format, same
+screens, same names where the concept is the same:
+
+| screen | rows | status |
+|---|---|---|
+| Controls | every action, remappable, swap-on-conflict, reset to defaults | done |
+| Graphics | Half resolution, view/zoom | half-res done; "view distance" becomes **map zoom** and the body-LOD distance |
+| Audio | Music on/off + volume, Effects on/off + volume, track list + attribution | done (menu music is `brittle_rille.mp3`, looped; per-context playlists in Part N4) |
+| Display | device brightness / screen settings via `se_hw.h` | done |
+| Livestream | on/off, applied by `main.c` because it owns the framebuffer | done |
+
+Rows this game will add, in the same style: **SAS by default** (start a
+mission in stability assist or in manual), **units** (metres vs kilometres
+on the HUD), and later **gyro look** once the look abstraction gets a
+second source (the abstraction is already there in `game/input.h`).
+
+Volume and brightness are the device's, not the game's, and `se_hw.h`
+owns them -- same rule as SynthMiner, same reason.
+
+### N3 -- What persists
+
+| path | what |
+|---|---|
+| `/sd/nisp/saves/save<n>.bin` | the slot: seed (kept for the title's island until it goes away), the mission state, the flown rocket's design id, apoapsis reached, missions completed |
+| `/sd/nisp/designs/<name>.nbp` | rocket blueprints, shared between slots |
+| `/sd/nisp/settings.txt` | settings and bindings |
+| `/sd/nisp/test/` | test-kit shots |
+
+A save holds **state, not geometry**: a state vector, an attitude, a
+design id, a mission log. The universe is regenerated from the body
+table, so a save stays a sentence however big the game gets -- the
+SynthMiner lesson, kept.
+
+The save schema gets a version field before any of this is added to it
+(D-23), because a slot that cannot be recognised is a slot a player
+deletes.
+
+### N4 -- Music: which track plays where
+
+Music follows the **context**, and the context is a screen except in
+flight, where it is the sim (D-28):
+
+| context | track | on the card |
+|---|---|---|
+| Title, menus, Spaceport, settings | `brittle_rille.mp3`, looped | `music/menu/` |
+| Engineering (the blueprint designer) | `sneaky_adventure.mp3`, looped | `music/engineering/` |
+| Flight, **inside** the atmosphere (pad, ascent, reentry, touchdown) | **silence** | -- |
+| Flight, **above** the atmosphere | `impact_lento.mp3`, looped | `music/space/` |
+
+Silence in the air is a choice, not an oversight (D-29). Launch, ascent
+and reentry are the loudest moments the game has and they are the moments
+the engine is busiest: the MP3 decoder is its own task on core 1
+resampling into a ring buffer, and clearing the music slot during
+atmospheric flight shuts that task down (F-14). So the phase that needs
+the most CPU is the phase that gets the least audio, and the payoff is
+not a frame rate number -- it is that the only music in flight is the
+music that means something, and the quiet while the air is still going
+past you is the effect.
+
+Rules that fall out of the table:
+
+- **The boundary is the atmosphere, not the screen.** Map mode keeps
+  whatever the mission's altitude says: orbit in map view is still
+  `impact_lento`, a ship sitting on the pad in map view is still silence.
+- **The switch is edge-triggered with a hysteresis band**: space above
+  70 km, back to silence below 60 km. Without the band, a suborbital hop
+  or an orbit whose periapsis dips into the air would tear down and
+  restart the decoder every pass (F-14), which is audible as a stutter
+  and expensive as a card read.
+- **Swaps fade, they do not cut.** ~0.5 s down on the old track, source
+  swap, ~0.5 s up on the new one, via `audio_mixer_set_music_volume()`.
+  A hard cut between two recordings on a badge with no volume ramp reads
+  as a crash.
+- **The user's switch outranks the game's.** Audio > Music off means no
+  music in any context; the context rule decides *which track*, the
+  setting decides *whether*. The procedural generator stays the fallback
+  for a card with no music installed, and it is not used as
+  atmospheric-phase filler -- that phase has no music by design.
+- **Attribution follows the track.** `music_attribution()` already reads
+  the `.txt` beside the playing file in its own directory, so all three
+  tracks are attributed correctly with no new code. With nothing playing,
+  the Audio screen says so rather than showing the last track.
+- **A playlist, not a file.** `se_mp3` plays every `.mp3` in the directory
+  it is handed, so each context's directory is its playlist: a player can
+  drop their own track into `music/space/` and it joins the rotation.
+  The Makefile's stem lists grow to match (`MUSIC_MENU_STEMS`,
+  `MUSIC_ENGINEERING_STEMS`, `MUSIC_SPACE_STEMS`) and `metadata.json` lists the
+  same files by hand, as it already does.
+
+---
+
+## Part G: render budget
+
+Measured on the badge with the current build (v2.7 engine, 2026-10-31):
+
+| scene | avg fps | worst frame | phase split |
+|---|---|---|---|
+| `perf scene=title secs=20` | 25.3 | 46.1 ms | logo 6.2 ms, rast 19.8 ms |
+| `perf scene=space secs=20` | 28.9 | 40.8 ms | rast 23.3 ms, wait 6.1 ms |
+
+Before the logo was packed for the blit the title ran at ~11 fps with
+`draw 58.7 ms` (F-01). That is the lesson to carry into the game work:
+the cost here is **pixels moved**, not geometry, and the two places
+pixels get moved for free are (a) drawing something at a size it does
+not need and (b) drawing it through a general-purpose path when a
+specialised one exists.
+
+Space is cheaper than the island in geometry and more expensive in
+overlay:
+
+- **Bodies.** Bob fills a large part of the screen near the surface: a
+  sphere tessellated by screen size, LOD ladder 96x48 / 48x24 / 24x12 /
+  12x6, chosen from the body's projected radius. A full-disc Bob at the
+  highest LOD is ~9,000 triangles, which is over `SE_SCENE_TRI_CAP`
+  (4,096) -- so the cap is a real constraint here and the LOD ladder is
+  not optional. Measured, not guessed (step 2.4).
+- **Orbit lines and map overlays** are a few hundred line segments
+  against a 4,096 cap: not a problem.
+- **HUD text** is Hershey-vector text, which is fast (the user's own
+  experience, and F-02 confirmed it here): the HUD is not the budget
+  problem and should not be optimised before it is measured.
+- **Half resolution** scales the *scene* through the PPA and leaves the
+  HUD at full resolution. It helps the rasterising phase and does nothing
+  for the overlay -- which is exactly why turning it on did not fix the
+  title (F-03).
+- **Heat and debris are sim cost, not render cost.** One float per part per
+  substep over <= 30 parts is nothing; the debris cap (8 bodies) exists to
+  bound the *physics* substep loop and the number of orbit lines map mode has
+  to draw, not the framebuffer. Debris is drawn as the same primitives as the
+  rocket, so it adds no new render path.
+
+Budget targets, to be measured rather than asserted: **>= 30 fps** in
+flight near the surface at half resolution, **>= 25 fps** in map mode,
+**>= 20 fps** with a full-disc Bob and a predicted path on screen. The
+profiler phases get extended for this game (`sim`, `phys`, `map`, `hud`
+alongside the existing `rast`, `logo`, `overlay`, `wait`) so a slow frame
+can be attributed rather than argued about.
+
+Every number in this part is a **badge** number. The virtual graceloader
+(F-17) runs the same build on this PC at 7.1-8.0 fps on the same two scenes,
+and that is the only thing it can say about time: it is an RV32 interpreter,
+not a P4, and nothing about its frame rate transfers. What the emulator
+answers is *what* is drawn and *how much* of it -- shot hashes, primitive
+counts, which phase eats a frame. What it answers about speed is nothing
+(D-39). A target in this part is met on a badge, or it is not met.
+
+---
+
+## Part H: the host harness
+
+Orbital mechanics and rocket arithmetic are the two parts of this project
+that can be **provably wrong without anything looking wrong**, and they
+are the two parts that are pure. So they get a host binary, exactly as
+SynthMiner's `worldcheck` does:
+
+```
+tools/nispcheck.c     compiled with plain host cc, links only against main/sim and main/rocket
+make check            hostpurity + nispcheck, and `make build` depends on it
+```
+
+**Host purity is enforced by a grep, not by convention:** no file under
+`main/sim/` or `main/rocket/` may include an engine, BSP, FreeRTOS or
+graceloader header, and `make check` fails if one does. That is what
+keeps the harness honest as the code grows.
+
+What it checks, and each of these is a case that has a hand-computed
+answer next to it:
+
+1. **The four KSP anchors** (F-11): 80 km circular orbit at 2,278.6 m/s
+   and 1,875 s; stationary orbit at 2,863.9 km; semi-synchronous at
+   1,581.8 km and 1,272.3 m/s; surface escape 3,430.5 m/s. If the body
+   table or the element conversion is wrong, one of these fails.
+2. **Kepler propagation round trip**: state -> elements -> propagate a
+   full period -> state, equal to the start within a metre over 10,000
+   periods, for e = 0, 0.2, 0.7, 0.95, and the hyperbolic case.
+3. **Patched conics**: a Cheese transfer orbit enters Cheese's SOI, the
+   patch chain exits it again, and the exit state matches a brute-force
+   integrated reference to a stated tolerance.
+4. **The transfer numbers**: from an 80 km circular orbit, a Hohmann
+   transfer to Cheese's orbit is 860 m/s, takes 7.95 h to arrival, and
+   circularising at 12,600 km costs 360 m/s more. These are the numbers a
+   player will look up on a wiki and compare against, so they are in the
+   test rather than in a comment.
+5. **Stack maths**: mass, CoM, CoT, inertia, drag centre and static margin for
+   a hand-written stack, against arithmetic done in the source -- including
+   Part A5's two-row example, because a sign error in the static margin is
+   invisible in every other number and flips the whole flight model.
+6. **Delta-v budget**: Kostya's equation per stage for a three-stage
+   stack, plus the TWR-under-1 case, plus the case where the total
+   delta-v is enough and the first stage is not.
+7. **The planner**: for each maneuver type, the node the planner produces
+   must actually produce the requested apoapsis / periapsis / inclination
+   when propagated -- i.e. the planner is checked by *flying its answer*,
+   not by checking its formula.
+8. **Refusals**: a burn below the surface, a burn inside the atmosphere,
+   a maneuver the stage cannot afford, a node placed where the orbit has
+   already been changed.
+
+9. **Heating and failure** (Part A4, Part F5): four scripted
+   `(altitude, speed, attitude)` profiles driven into `rocket/heat` directly --
+   the profiles are inputs, so the heat model stays pure and host-testable
+   while `flight/` integrates them for real. A nominal launch must leave every
+   part under 50 % of its limit. A nominal reentry from a 100 km orbit, capsule
+   facing the flow, must lose at most the unprotected lower parts and keep the
+   capsule. A steep reentry, or a stack flying engines-first, must destroy the
+  capsule. And the fourth is the dart: Part A5's burnt-out stack, flying
+  shield-first at reentry speed, must also destroy the capsule -- it is the
+  stable attitude and it is still fatal, which is the case that keeps the
+  shield from ever being implemented as immunity (F-16, D-36).
+  These four cases are what the `capacity` / `limit` / `shield`
+   columns mean, and they are tuned here rather than by flying a badge.
+10. **The split**: a stack with a part removed in the middle produces two
+    fragments whose masses sum to the original minus the lost part, whose CoM
+    and CoT match hand arithmetic, and of which exactly one contains the
+    capsule.
+
+### The three harnesses, and what each one may be believed about
+
+| Harness | Command | May be believed about | Must not be asked |
+|---|---|---|---|
+| host binary | `make check` | the orbital and rocket arithmetic | anything drawn, anything about time |
+| virtual graceloader | `make emu-run`, `make emu-test` | what a screen looks like, whether a flow works, whether a scene's primitive counts changed, whether a save round-trips | frame rate, and every number in Part G (F-17, D-39) |
+| badge | `make cycle TEST="..."` | the numbers Part G is built on, and every Accept line that says "on the badge" | how fast an idea gets a first look |
+
+The middle row is new (F-17, D-39) and it is the one most of blocks 4, 6,
+7 and 9 will actually be iterated in: the same `app.so`, the same install
+path, the same `@@SR-*@@` records, no badge in reach.
+
+The starting reference set, from two identical runs of the manifest on
+2026-10-31, each in its own launch and each after a fresh build of `app.so`:
+`settings` `d858e651`, `graphics` `f1b873c0`, `audio` `3a203dad`, `display`
+`49b7b2f1` -- reproduced exactly, both times. The title is not in the set and
+cannot be until step 10.5 (F-19).
+
+---
+
+## Part D: step-by-step plan with status tracking
+
+**Status values:** `todo` / `in progress` / `done` / `blocked (why)` /
+`skipped (why)`. The Notes column records the result, with links to
+findings (F-n) and decisions (D-n). A block is not finished until its
+**Accept** line is true, not until its last sub-step was typed.
+
+### Already in place (the skeleton, committed 2026-10-31)
+
+| Item | Status | Notes |
+|---|---|---|
+| SynthEngine3D as a submodule, v2.7 | done | `make engine` updates it; the app does **not** call `se_stream_reserve_permanent_memory()` -- that was a SynthMiner need only (D-02) |
+| Engine splash on boot | done | `se_splash()` is the first thing `on_init()` does, as in SynthMiner |
+| Logo on the title, from the SD card | done | `nullislandlogo_ball.png` beside `app.so`, packed once into RGB565 column runs (D-03, F-01) |
+| Title bar Play / Settings / Quit; livestream under Settings | done | the user's correction, kept (D-04, D-05) |
+| Save slots, `settings.txt`, key bindings | done | `/sd/nisp`, outside the install directory |
+| Menu music `brittle_rille.mp3`, looped, licenses shipped | done | `make install` uploads mp3 + txt; `make push` sends `app.so` only (D-08, D-09) |
+| Test kit (`perf`, `shots`), profiler phases | done | `results/` holds the runs; `perf scene=title` 25.3 fps, `perf scene=space` 28.9 fps |
+| Virtual graceloader as a test harness | done | `nisp` added to `../virtual-tanmatsu-graceloader/Makefile`; `make emu-run` for the window, `make emu-test` for the suite -- one fixed command, manifest in `tools/emutests.txt`, records in `results/emulator/latest.log` (F-17, D-39, D-40, D-41) |
+
+### The plan
+
+| # | Step | Status | Notes |
+|---|---|---|---|
+| **0** | **Scaffolding (host only, no badge)** | | |
+| 0.1 | This document: design parts L O A V B F M N G H, the status table, F-01..F-19, D-01..D-41 | done | 2026-10-31. The game brief arrived the same day; the numbers in Part O are derived from KSP 1's published parameters and cross-checked against four player-quotable anchors (F-11). Design parts A5 (aerodynamics) and V7 (landing legs) came from the same conversation. |
+| 0.2 | `tools/nispcheck.c` + `make check` = `hostpurity` + `nispcheck`, and `make build` depends on it | todo | The host-purity grep is the load-bearing part: nothing under `main/sim/` or `main/rocket/` may include an engine or BSP header. |
+| 0.3 | `sim/units.h` and `sim/bodies.{c,h}`: the BODY[] registry, Bob / Cheese / Frodo as rows | todo | Units decided first, before any orbital code is written, because retrofitting km-into-metres is the expensive direction (D-15). |
+| 0.4 | CMake: the new directories in `APP_SOURCES` as they arrive; profiler phases `sim`, `phys`, `map` added to `testkit/profile.h` | todo | `SE_SCENE_TRI_CAP` 4,096 / `LINE_CAP` 4,096 / `POINT_CAP` 1,024 stay as they are until step 2.4 says otherwise. |
+| 0.5 | `nisp` in the virtual graceloader's app list, the imports its trap table was missing, its debug console backed by stdin, and one fixed command that runs the whole suite | done | 2026-10-31. `make emu-run` / `make emu-test` work from this repo; `perf` and `shots` both come back with records, and two identical runs of the manifest produce the same record chain (F-17, F-18, D-41). |
+| | **Accept:** `make check` green, `make build` clean, `make verify` passes | todo | |
+| **1** | **The sky, as maths (host only)** | | |
+| 1.1 | `sim/kepler.{c,h}`: state <-> elements; elliptic and hyperbolic anomaly solvers; derived readouts (Ap, Pe, period, inclination, time to apsis) | todo | Elements are a view, the state vector is the truth (D-17). |
+| 1.2 | `sim/ephemeris.{c,h}` + `sim/patches.{c,h}`: circular body orbits, SOI entry/exit by conic-sphere intersection, the future-patch chain capped at 4 | todo | |
+| 1.3 | `sim/atmosphere.{c,h}` + `sim/surface.{c,h}`: exponential density, drag coefficient and reference area from the stack, the pad at 0N 0E with its 174.9 m/s rotational velocity | todo | |
+| 1.4 | `nispcheck` cases 1-4: the four KSP anchors, the 10,000-period round trip, the patched-conic transfer against a brute-force integrated reference, the Hohmann numbers | todo | 860 m/s out, 7.95 h coast, 360 m/s to circularise (F-11). |
+| | **Accept:** every case in Part H 1-4 passes, with the tolerances printed | todo | |
+| **2** | **The sky, on the badge** (replaces the island) | | |
+| 2.1 | `game/scene.c` rewritten: bodies as lit spheres, camera-relative submission in metres (D-16), LOD ladder 96x48 -> 12x6 by projected radius | todo | A full-disc Bob at the top LOD is over `SE_SCENE_TRI_CAP`; the ladder is what keeps it under, and step 2.4 measures where the ladder has to start. |
+| 2.2 | The sun as a direction: `normalize(Frodo - camera)` fed to the engine's directional light every frame | todo | The engine has no point lights and needs none here -- from near Bob, Frodo's direction is the same to within a fraction of a degree across the whole scene. |
+| 2.3 | Starfield kept; the title screen becomes the ship drifting past Bob with Cheese in the frame, logo and wordmark over it | todo | The title must stay a *pure function of the clock* or the `shots` hashes stop meaning anything (`testkit/devtest.h`). |
+| 2.4 | Measure: `perf scene=title` and `perf scene=space`, phase split recorded here | todo | Baseline to beat: 25.3 / 28.9 fps with the island. |
+| 2.5 | Delete the island: the heightmap, the obelisk, the beacons, `BENCH_SEED`'s island meaning | todo | Not before 2.1 is on screen -- the island is the fallback that makes 2.1 measurable against something. |
+| | **Accept:** >= 25 fps with Bob full-disc and Cheese in frame; the island is gone | todo | |
+| **3** | **The rocket, as maths (host only)** | | |
+| 3.1 | `rocket/parts.{c,h}`: the PART[] registry -- capsule, four engines, the solid booster, the cargo/adapter section, RCS, legs, separator; propellant density and structural fraction as constants | todo | Data rows (Part V2), tuned by 3.3's numbers, not by feel (F-12). This table *is* the Engineering legend (Part B3). |
+| 3.2 | `rocket/stack.{c,h}`: blueprint -> total mass, per-stage mass, CoM, CoT, inertia, drag centre, static margin; recomputed on stage separation and as fuel burns | todo | 1-D along the stack axis (Part V4). The static margin is one more sum in the same pass (Part A5), and its sign is what Part H 5 checks. |
+| 3.3 | `rocket/budget.{c,h}`: delta-v per stage, TWR, burn time, total | todo | |
+| 3.4 | `rocket/design.{c,h}`: `/sd/nisp/designs/<name>.nbp`, the design list, rename, delete | todo | Shared between slots, not inside a slot (Part N3). |
+| 3.5 | `nispcheck` cases 5-6: the hand-computed stack, the delta-v budget, the TWR-under-1 trap | todo | |
+| 3.6 | `rocket/heat.{c,h}`: per-part accumulation, cooling, `temp >= 1` failure, the capsule shield factor | todo | One float per part (Part A4). Pure, so the thresholds are tunable on a host. |
+| 3.7 | `nispcheck` cases 9-10: the four heating profiles, the split arithmetic | todo | This is where `capacity` / `limit` / `shield` get their values (Part V2), and where the dart case proves the shield is a factor and not immunity (F-16). |
+| | **Accept:** Part H 5-6 and 9-10 pass; a named design round-trips through the file byte-identically; a nominal launch heats nothing past 50 % | todo | |
+| **4** | **Engineering** | | |
+| 4.1 | `engineering/builder.{c,h}`: the working design in RAM, the stage cursor, add / remove stage, the PARTS legend and its scroll | todo | Focus ring PARTS ⇄ BLUEPRINT; NOTES never takes focus (Part B2). |
+| 4.2 | Parameter ladders on the selected stage: diameter, length, engine, engine count, RCS, side boosters, leg set | todo | Ladders, not numeric fields; the sheet redraws on the same frame (Part B2). |
+| 4.3 | `engineering/sheet.{c,h}`: drafting-blue paper, minor/major grid, white pencil strokes from the stack maths, dimension callouts, title block, stowed and deployed leg strokes | todo | 2-D direct-565 lines, not `scene_line` (F-13, D-27). Legs are the one parameter drawn rather than only called out (Part V7). |
+| 4.4 | `engineering/notes.{c,h}`: the post-it cards, recomputed from `rocket/budget` on every edit | todo | Stage card, total card, conditional warning card (Part B4). Ratings only -- no survivability verdict, ever (D-37). |
+| 4.5 | `engineering/icons.{c,h}`: PART[] -> 32x32 pencil icons from the same geometry the sheet draws | todo | No image files, no sprite sheets (Part B3). |
+| 4.6 | Save / Save as / Load design / Launch, with **Launch disabled until the design is named** | todo | The user's rule, enforced in the menu (D-11); the unnamed state shows in the title block. |
+| 4.7 | The Spaceport hub screen, hung off the existing slot menu (Part N1) | todo | Function first, parameters second (D-24): the hub lists verbs, the design/mission picker is a second screen. |
+| 4.8 | Measure: `perf scene=engineering`, and decide there whether the sheet needs caching into a layer | todo | Target >= 40 fps. Half resolution does nothing here (Part B6). |
+| 4.9 | `music/engineering/` playlist: `sneaky_adventure.mp3` looped while Engineering is up, back to the menu track when it closes; Makefile stem lists and `metadata.json` extended | todo | Part N4. The `.txt` license travels with it, as always (D-06). |
+| | **Accept:** build a rocket on the badge that Part 3's budget says can reach 100 km, name it, launch it -- and the screen reads as a blueprint, not a menu | todo | |
+| **5** | **Flight physics** | | |
+| 5.1 | `flight/physics.{c,h}`: rigid-body state, quaternion attitude, velocity-Verlet at `dt_phys` 0.02 s | todo | One body per fragment (D-22): nothing flexes, and a split makes two bodies out of one through the staging path (D-32). |
+| 5.2 | Thrust at CoT, `(CoT - CoM) x F` torque, staging, separators, booster burn-out and separation | todo | |
+| 5.3 | Drag and aero torque from `sim/atmosphere` and the stack's static margin, terminal velocity, the parachute | todo | The weathervane is what makes a lone capsule fly shield-first and a burnt-out stack fly like a dart (Parts A5, V4). Same equation, three orders of magnitude of `q`. |
+| 5.4 | SOI switching in flight; analytic coasting above the atmosphere, integration while thrusting or in air | todo | |
+| 5.5 | `flight/warp.{c,h}`: warp ladder, substep cap, the refusals (thrusting, in atmosphere) | todo | Warp 1000 while coasting must cost nothing (Part F1). |
+| 5.6 | RCS torque budget + SAS (damped attitude hold, reference directions) | todo | |
+| 5.7 | Leg deployment, per-fragment touchdown thresholds (`rated_v` / `rated_tilt`), impact, mission outcome | todo | Part V7. A leg set selects which thresholds apply; it does not add a contact mechanic. |
+| 5.8 | Music context switch: silence inside the atmosphere, `music/space/` above it, edge-triggered with the 60/70 km hysteresis band and a 0.5 s fade | todo | Part N4. The altitude the switch uses is the one `sim/atmosphere` already computes -- no second definition of "in the air". |
+| 5.9 | Heat in the tick: `rocket/heat` fed `rho`, `v_rel` and the attitude every substep; a failed part cuts the stack through the staging path | todo | Part F5. A burn-through is a staging event the player did not ask for -- same recompute, no second code path. |
+| 5.10 | Debris: ballistic bodies, capped at `NISP_DEBRIS_MAX`, each still heated and each allowed to fail once | todo | Drawn, and visible in map mode (Part F5). |
+| | **Accept:** a scripted launch reaches a stable 100 km orbit; a planned deorbit lands under chute on Bob and survives; a Cheese landing survives **on legs** and the same stack without legs wrecks; a too-steep deorbit loses the pod and the mission ends in the air; a reentry with the burnt-out stage still attached is stable, dart-shaped, and still cooks the capsule | todo | |
+| **6** | **HUD and controls** | | |
+| 6.1 | Orbital readouts: altitude, surface and orbital speed, Ap / Pe, period, time to Ap / Pe, inclination, current SOI, warp factor | todo | Replaces the island's MARK readout. |
+| 6.2 | Attitude indicator: prograde / retrograde / normal markers, the burn vector when a node is armed | todo | |
+| 6.3 | Throttle, staging, warp, SAS keys, all of them bindings in Settings -> Controls | todo | The action enum is append-only (`game/input.h`): reordering moves every saved binding. |
+| 6.4 | Mode indicators: SAS on/off and its reference, auto-guidance armed, delta-v remaining on the armed node | todo | |
+| 6.5 | Heat readout: the hottest part as a bar against its limit, named when it passes 70 %, and a fragment count when the stack has split | todo | Part F5. A failure the player cannot see is a failure they cannot learn from. |
+| 6.6 | Stability readout: the static margin as a signed number in metres, with the drag centre and CoM marked on the attitude indicator | todo | Part A5. This is where the game teaches the dart case -- the player watches the number cross zero as a stage empties, instead of being told it in Engineering (D-37). |
+| | **Accept:** every number a flight needs is on screen, and every key that changes it is remappable | todo | |
+| **7** | **Map mode and manual nodes** | | |
+| 7.1 | `map/map_view.{c,h}`: TAB to map, the current SOI's plane, Bob and Cheese as discs, Cheese's orbit, the ship | todo | The ship keeps flying while the map is up. |
+| 7.2 | `map/orbit_draw.{c,h}`: the conic as a polyline sampled from the elements (128 samples), plus the predicted path through the patch chain | todo | |
+| 7.3 | `map/node.{c,h}`: node placement along the orbit and the six axes (prograde, radial, normal, time) on six keys with a big-step modifier | todo | |
+| 7.4 | Execute a node: warp to it, align to its vector, burn, cut off at the planned delta-v | todo | |
+| | **Accept:** a manually dialed node raises apoapsis to the dialed value within 1% when executed | todo | |
+| **8** | **The auto-planner** | | |
+| 8.1 | `map/planner.{c,h}`: change apoapsis, change periapsis -- burn point, delta-v, time to burn | todo | |
+| 8.2 | Change inclination, at the sooner node, `2 v sin(di/2)` | todo | |
+| 8.3 | Auto-guidance: steer to the planned vector, execute, cut off | todo | |
+| 8.4 | Affordability and refusals: below the surface, inside the atmosphere, more delta-v than the stage has | todo | Refused with the number that says so (Part M4). |
+| | **Accept:** Part H 7-8 pass on the host; on the badge, "apoapsis 150 km" from a 100 km orbit produces a burn that makes it so | todo | |
+| **9** | **Mission lifecycle and persistence** | | |
+| 9.1 | Save schema v2: mission state (body, state vector, attitude, stage index, fuel, **which parts of the design are still attached**), design id, mission log | todo | Versioned before the fields are added (D-23). A saved mid-flight mission may be a fragment, so the save says which range of the design is still flying. |
+| 9.2 | Launch flow from the pad; the ship on the mount; nothing to count down | todo | |
+| 9.3 | Landing, recovery, wreck (from touchdown **or** from the capsule burning up in flight), and what the slot remembers afterwards | todo | A wreck records where it happened -- altitude and speed are the lesson (Part F5). A Cheese touchdown is the case legs exist for (Part V7). |
+| 9.4 | Design library: list, open, rename, delete, from the Spaceport | todo | |
+| | **Accept:** title -> Spaceport -> build -> name -> launch -> orbit -> deorbit -> land -> save -> continue, with no step missing | todo | |
+| **10** | **Test kit and regression** | | |
+| 10.1 | Content scenes: `title`, `orbit`, `launch`, `transfer`, `map`, `engineering` -- each scripted, each a pure function of the clock | todo | A scripted flight is the only way `shots` can mean anything here (the existing bench flight is the pattern). |
+| 10.2 | `make testrefs` / `make testcompare` references committed | todo | |
+| 10.3 | `perf` scenes for flight and map, recorded in Part G | todo | |
+| 10.4 | Host/device parity: the same sim numbers from `nispcheck` and from the badge's `perf` run, compared; and the same `shots` hashes from the emulator and from the badge | todo | float32 both sides, so this should be exact rather than close. If the emulator's hashes match the device's, the emulator carries the visual regression suite and the badge carries the timing one (F-17). |
+| 10.5 | Make the shot set reproducible: freeze the build stamp while a test is running, or keep the title out of the shot set | todo | The title draws `APP_GIT_HASH  APP_BUILD_TIME`, so its framebuffer hash changes on every rebuild while nothing about the screen did (F-19). This blocks a committed `testrefs` reference for any screen that prints the stamp, on the badge as much as on the emulator. |
+| | **Accept:** `make testrun` green on the badge; references in the repository | todo | |
+| **11** | **Performance and polish** | | |
+| 11.1 | Profiler phases for `sim`, `phys`, `map`, `hud`; a measured budget table in Part G | todo | |
+| 11.2 | LOD ladder and star count tuned against the measured budget | todo | |
+| 11.3 | Settings rows this game needs: SAS by default, HUD units, map zoom (replacing the island's view distance) | todo | |
+| 11.4 | README and this document brought to the state the code is actually in | todo | |
+| | **Accept:** Part G's targets met, or the shortfall written down with the numbers that explain it | todo | |
+
+### Explicitly out of scope for this plan
+
+Not deferred-by-accident; excluded on purpose, each one its own future
+document if it ever happens:
+
+- science points, money, contracts, achievements, a tech tree
+- crew / kerbals, seats, IVA, landing legs **as contact physics** -- legs exist
+  as a touchdown rating (Part V7, D-38); a leg that crushes, snaps or absorbs
+  an impact does not
+- docking, part collisions, wobble, and structural failure **from loads** --
+  failure from heat is in (Part F5); failure from thrust, contact or bending
+  is not
+- more bodies, other star systems, transfer/intercept planning
+- atmosphere rendering (clouds, sky colour, reentry glow), terrain heightmaps
+- multiplayer, replays, mission editor
+
+---
+
+## Part E: findings and decisions log
+
+### Findings
+
+- **F-01** 2026-10-31: **the title screen's cost was the logo, and it was a
+  layout problem, not a size problem.** The first measurement put the title at
+  ~11 fps with `draw 58.7 ms` for a 341x340 artwork. The artwork was being
+  decoded once and then blitted as ARGB8888 through `pax_draw_image()` --
+  per-pixel alpha, per-pixel addressing -- every frame.
+  What it is now: packed at load into the framebuffer's own RGB565 halfwords,
+  **column-major**, each column trimmed to the rows the artwork touches, with
+  its fully opaque middle recorded as a run. Drawing is 341 contiguous sweeps:
+  plain halfword stores for the middle, a blend only for the soft edge, nothing
+  at all for the transparent corners. 91,734 pixels in spans, 90,910 of them in
+  opaque runs, 824 that actually need a blend. **6.2 ms**, and the title went
+  11 -> 25.3 fps.
+  The general rule for this game: the expensive thing is a general-purpose
+  drawing path used where the data already knows how it wants to be drawn.
+
+- **F-02** 2026-10-31: **Hershey vector text is not the bottleneck.** The user
+  said so from experience across several games; the measurements agree (the
+  title's text overlay is a few hundred pixels and does not register against a
+  19.8 ms raster). Text is therefore *not* a thing to optimise here before it
+  is measured, which matters because a HUD-heavy game invites exactly that
+  guesswork.
+
+- **F-03** 2026-10-31: **half resolution did not fix the title, and the reason
+  is which pixels it scales.** Half-res renders the *scene* into a half-size
+  layer and the PPA scales it up; the logo, the wordmark and the HUD are drawn
+  at full resolution on top of the result. Turning it on while the cost was a
+  full-resolution 341x340 blit changed nothing, which is what it should have
+  done -- and is why the profiler has a separate `logo`/`overlay` phase outside
+  `rast` rather than inside it.
+
+- **F-04** 2026-10-31: **after the app exits, the badge is in the launcher in
+  debug mode**, so the next badgelink command fails for a reason that looks
+  like a bug in the app. `make mode_badgelink` first (BadgeLink mode shows as
+  `16d0:0f9a`, debug as `303a:1001`). A second `mode_badgelink` that fails with
+  `could not open port /dev/ttyACM0` usually means the first one already
+  worked -- `make mode_badgelink` does not always succeed on the first try.
+
+- **F-05** 2026-10-31: **the engine's MP3 source plays a directory, not a
+  file.** `se_mp3.c` enumerates every `.mp3` it is handed and cannot be pointed
+  at one track, which is why the menu's track lives in `music/menu/` while the
+  rest of the pool sits in `music/`. A card with no music falls back to the
+  procedural generator rather than to silence.
+
+- **F-06** 2026-10-31: **v2.7's only API change is a SynthMiner-specific one.**
+  The engine moved `bf39a61` -> `f21bc09` for `se_stream_reserve_permanent_memory()`;
+  nothing in this app calls it. The memory reservation for streaming was a
+  SynthMiner requirement (its `main/main.c`) and is **not** a general engine
+  requirement, so it is not copied here.
+
+- **F-07** 2026-10-31: **the baselines, with the phase split.** `perf scene=title
+  secs=20`: 25.3 fps average, worst frame 46.1 ms, logo 6.2 ms, raster 19.8 ms,
+  507 frames. `perf scene=space secs=20`: 28.9 fps, worst 40.8 ms, raster
+  23.3 ms, wait 6.1 ms, 578 frames. Raster dominates both. Every future
+  performance claim in this project is measured against these two numbers and
+  recorded in Part G.
+
+- **F-08** 2026-10-31: **a body table that is internally inconsistent is
+  invisible until an orbit leaks.** Deriving the three bodies from KSP's
+  published numbers produced one consistency test that no individual number
+  can give: a moon's SOI has to fit inside its Hill sphere. Cheese's SOI is
+  2,400 km and its Hill sphere at a = 12,000 km is 3,170 km -- consistent.
+  The alternative reading of the same sources (Cheese at ~3,550 km, which is
+  what a 6.2-hour period would imply) puts its Hill sphere at 936 km, *inside*
+  its own SOI, which is impossible. That is the test that picked the orbit, and
+  it is in `nispcheck` rather than in this paragraph.
+
+- **F-09** 2026-10-31: **there is no hardware double here, and that is a design
+  input, not an inconvenience.** The toolchain is `rv32imafc`: single-precision
+  float in hardware, doubles through libgcc's soft-float. An orbital sim written
+  in metres spends its precision on the exponent (1e7 m -> ~1 m resolution) and
+  its time on soft-float. Written in kilometres it has centimetre-level
+  resolution and stays in hardware float throughout. Hence D-15, decided before
+  a line of orbital code exists.
+
+- **F-10** 2026-10-31: **the engine's light is directional with no falloff**,
+  and for this game that is not a limitation but the right model: from anywhere
+  near Bob, the direction to Frodo is the same to well under a degree across the
+  whole scene. The sun therefore becomes a per-frame direction
+  (`normalize(Frodo - camera)`) rather than a light source with a position, and
+  no point light is needed.
+
+- **F-11** 2026-10-31: **four numbers players already know, used as anchors.**
+  A body table can be wrong in a way that looks completely plausible on screen.
+  The four Kerbal values that any player can quote -- 80 km circular orbit at
+  2,278.6 m/s, stationary orbit at 2,863.9 km altitude, semi-synchronous orbit
+  at 1,581.8 km and 1,272.3 m/s, surface escape velocity 3,430.5 m/s -- are
+  reproduced by `mu = 3530.46 km^3/s^2`, `R = 600 km`, `T_rot = 21,549.4 s` to
+  better than 0.1%. They are the first test in `nispcheck`, and they are why
+  the derived Hohmann numbers (860 m/s out, 7.95 h coast, 360 m/s to
+  circularise at Cheese) can be trusted before a single frame is drawn.
+
+- **F-12** 2026-10-31: **the delta-v budget is the builder's only feedback, and
+  the trap it has to catch is TWR, not delta-v.** A stack can have a textbook
+  total delta-v and never leave the pad, because its first stage thrusts at
+  0.8x its own weight. `rocket/budget.{c,h}` reports both per stage and in
+  total, and `nispcheck` has exactly that case -- enough total delta-v, a first
+  stage that cannot lift -- because it is the mistake a real player makes first.
+
+- **F-13** 2026-10-31: **the engine already has the 2-D leaves a blueprint
+  needs, so a 2-D screen needs no 3-D pipeline at all.** `se_direct565.h`
+  exposes `direct_565_line`, `direct_565_tri`, `direct_565_vrun` and
+  `direct_565_dim_rect` as inline primitives straight into the framebuffer,
+  `se_text.h` is Hershey vector text, and `pax_background()` is a plain clear.
+  A blueprint sheet is therefore a frame clear plus a few hundred line calls
+  plus text: no camera, no depth buffer, no `SE_SCENE_*_CAP` involved, no PPA
+  upscale. `main/ui/menu.c` and `main/ui/logo.c` already draw this way, so this
+  is the app's existing path, not a new one.
+
+- **F-14** 2026-10-31: **there is one music slot, and swapping it is not
+  free.** `audio_mixer_set_music()` installs one `music_source_t` and fires the
+  previous source's `shutdown()`; `se_mp3` runs minimp3 in its own task on core
+  1, reading the card and resampling into a ring buffer. So a track change is a
+  task teardown plus a card read plus a decoder start -- fine at a screen
+  boundary, not something to do per frame. And `se_audio.h` is explicit that a
+  source rendering silence still counts as active, so "no music" has to be a
+  cleared slot (or the `_enabled` gate), not a source that plays nothing.
+  Hence the hysteresis band in D-29: an orbit with a periapsis inside the
+  atmosphere would otherwise swap the source once per pass.
+
+- **F-15** 2026-10-31: **peak heating rate does not tell a launch from a
+  reentry.** On this atmosphere `rho v^3` is 6.9e8 at 10 km doing 1,500 m/s -- a
+  hard launch -- and 5.1e8 at 20 km doing 2,458 m/s -- a reentry from a 100 km
+  orbit. The launch is the hotter instant. Only the *integral* separates them:
+  a reentry spends minutes in that band, an ascent crosses it in tens of
+  seconds. So any heat model keyed on instantaneous speed or dynamic pressure
+  gets the two cases backwards, and the model has to accumulate per part with a
+  cooling term. Hence D-30.
+
+- **F-16** 2026-10-31: **a stable reentry attitude is not a survivable
+  reentry.** With a burnt-out stage still attached, the static margin of a
+  1.25 m stack goes from -0.19 m to +2.47 m (Part A5's table): the heavy capsule
+  leads and the empty stage acts as fletching, so the air itself holds the pod
+  shield-first for the whole descent. That is the *correct* aerodynamic answer
+  and it is still fatal, because the shield is a factor of ~0.1 on a heat load
+  of 5.1e8 and the capsule has a finite limit. Two consequences: the heat
+  thresholds cannot be tuned against "shield forward means safe" (D-36), and a
+  stability readout on its own can mislead -- the HUD has to show the margin and
+  the heat, not one of them (steps 6.5, 6.6).
+
+- **F-17** 2026-10-31: **the test kit runs end to end on this PC, with nobody
+  at a device.** `../virtual-tanmatsu-graceloader` interprets the same
+  `app.so`, staged from this repo's `metadata.json`, at the same install path
+  it has on a card. Six imports its trap table did not have blocked the load
+  outright: four `esp_h264_enc_*` (the livestream path), `pax_decode_png_fd`
+  (the logo), `strftime`. The debug console was a stub returning
+  `ESP_ERR_NOT_SUPPORTED`, so it is now backed by stdin
+  (`src/shims/console_shim.c`) and a piped `RUN ...` is a command the app
+  really receives. `perf` and `shots` come back with the same record chain
+  `tools/testrun.py` parses off a badge, and the app exits by itself
+  (`bsp_device_restart_to_launcher()`, which the emulator implements as
+  `exit(0)`), so a run needs no window and no keyboard. Measured here:
+  7.1-8.0 fps, `rast` 104-112 ms of a ~140 ms frame, logo 5.5 ms, 742 tris /
+  24 lines on the title and 481 / 19 on the bench -- the same *shape* as the
+  badge's 25.3 and 28.9 fps, at roughly a quarter of the speed, which is why
+  the shape is the only thing carried across (D-39).
+
+- **F-18** 2026-10-31: **the emulator cannot run sandboxed, and a command
+  whose text varies asks for permission again every time.** Guest memory is a
+  single `mmap(MAP_32BIT)` below 2 GiB, which the sandbox's seccomp filter
+  kills with `Bad system call (core dumped)`; it opens an SDL window too, so
+  the tooling classifies it as a GUI app. Both mean the run has to be
+  escalated, and an escalation is remembered per exact command string: a
+  different `TEST="..."`, a `| grep`, a different timeout -- each one a new
+  prompt. Hence D-41: one command, always the same three words.
+
+- **F-19** 2026-10-31: **a `shots` hash of the title screen is not
+  reproducible, and cannot be while the title prints the build stamp.** Two
+  identical runs of the same manifest gave `title_000000.png` hashes
+  `5beae48b` and `ed4ac37e` with identical primitive counts (746 tris, 23
+  lines) both times. The difference is `main/ui/title.c:89`, which draws
+  `APP_GIT_HASH  APP_BUILD_TIME`, and `APP_BUILD_TIME` changes on every build
+  -- the pixels differ because the binary was rebuilt, not because anything
+  regressed. `settings_000000.png` hashed `d858e651` in both runs. Step 10.5
+  is the fix; until then only stamp-free screens are valid references.
+
+### Decisions
+
+- **D-01** The game is **Null Island Space Program**, motto *"To nowhere, and
+  beyond!"*, logo `nullislandlogo_ball.png`, slug `at.cavac.nisp`.
+- **D-02** **No chunk streaming, and no stream memory reservation at boot.**
+  Whatever SynthMiner needs there, this game does not: there is no paged world
+  to page in.
+- **D-03** The logo is **data on the card beside `app.so`**, not a blob in the
+  binary: it can be redrawn without rebuilding, and `metadata.json` lists it as
+  an asset so an install from the app repository brings it along.
+- **D-04** The bottom bar is **Play / Settings / Quit**, as in SynthMiner.
+  Play opens the slots. The livestream is **not** a title-bar item.
+- **D-05** Settings, audio and display keep the **SynthMiner shape**: Controls /
+  Graphics / Audio / Display / Livestream, one `settings.txt`, volume and
+  brightness owned by the device through `se_hw.h`.
+- **D-06** The mp3s and their license `.txt` files **are in git** and are
+  uploaded to the card with the app. Music without its license file is not
+  shippable music.
+- **D-07** Menu music is `music/menu/brittle_rille.mp3`, **looped**, replacing
+  the procedural generator (which stays as the fallback when the card has no
+  music).
+- **D-08** `make push` uploads `app.so` only; `make install` uploads everything
+  and is for when the assets actually changed.
+- **D-09** Player data lives in `/sd/nisp`, outside the install directory the
+  launcher owns. Copying that directory is the whole backup.
+- **D-10** **No free-hand rocket building.** A rocket is a blueprint of
+  configured stages: there is no mouse, and pretending otherwise would be a
+  worse game on this hardware.
+- **D-11** **A design must be saved under a name before it can be launched.**
+  Enforced in Engineering, not left to the player's diligence.
+- **D-12** Building is **top-down**: the capsule is always the top, stages are
+  added beneath it, and staging advances downward from stage 1.
+- **D-13** **No science points, no money, no achievements, no crew.** Robotic
+  capsules only. The whole scope right now is "build rockets that fly".
+- **D-14** Three flight modes -- **manual, stability assist, automatic guidance
+  onto the next node** -- and a **simplified map**: six-axis manual nodes, or
+  TAB to the auto-planner with *change apoapsis / change periapsis / change
+  inclination* for now.
+- **D-15** The simulation is in **kilometres, seconds and km^3/s^2**, float32.
+  Rendering converts to metres, camera-relative.
+- **D-16** **Camera-relative submission**: the renderer never sees a coordinate
+  above ~1e6 m.
+- **D-17** The **state vector is the truth**; orbital elements are a view of it,
+  derived on demand and cached.
+- **D-18** **Bob is a sphere for physics.** A visual heightmap may come later;
+  it is not in the first playable build, and nothing may depend on it.
+- **D-19** One **exponential atmosphere** (scale height 5.6 km, top 70 km,
+  101.325 kPa at the surface) rather than KSP's temperature-and-pressure curve.
+- **D-20** **Heating is a rule, not a simulation.** Shield forward and on top
+  survives; exposed at orbital speed in dense air does not.
+  (Refined by D-30..D-33: the rule is per part, it accumulates, and a failure
+  splits the stack rather than ending it.)
+- **D-21** **Stage separators are implicit** -- a stage boundary is a separator.
+  Side boosters ignite with their stage's main engine and separate when *they*
+  are empty, not when the stage is.
+- **D-22** **The rocket is one rigid body.** No joints, no wobble, no
+  part-level contacts; CoM and CoT are computed over all connected parts and
+  recomputed as fuel burns and stages separate.
+  (D-32 is the one exception: a burn-through cuts the body, and each fragment
+  is then rigid in the same sense.)
+- **D-23** The save schema gets a **version field** before mission state is
+  added to it.
+- **D-24** The **Spaceport is a hub**: you pick the *function* first
+  (continue / build / launch / manage designs / manage the slot), and only
+  then the parameters that function needs -- which saved design to launch,
+  which in-progress mission to continue. The hub itself never expands into
+  one row per design or per mission.
+- **D-25** Engineering is a **blueprint sheet, not an assembly view**: a
+  scrollable part legend on the left (168 px), the drawing in the middle
+  (424 px), post-it stat notes on the right (208 px). The drawing is a
+  classic drafting-blue sheet with white pencil technical drawing, dimension
+  callouts and a title block. The stage list, the readouts and the preview
+  are the same object.
+- **D-26** **RCS and side boosters are stage parameters, not legend parts.**
+  A stage has them or does not; there is no attach interaction, because an
+  attach interaction needs a pointer this device does not have.
+  (Extended by D-38: landing legs are a third such parameter.)
+- **D-27** The sheet is drawn with the **2-D direct-565 leaves**, not the 3-D
+  scene pipeline (F-13). Half resolution has no effect on it, and it is
+  expected to be the cheapest screen in the game -- measured in 4.8, not
+  assumed.
+- **D-30** Heating is **`rho * v^3` accumulated per part**, with a cooling time
+  constant and a per-part limit, and it is the same model in the launch and in
+  the reentry (Part A4, F-15). No temperature field, no conduction, no view
+  factors, no solar heating.
+- **D-31** **The capsule's heat shield is the only protection in the game**, and
+  only while it faces the oncoming air. A capsule with nothing attached orients
+  shield-first by drag, because its mass is biased toward the shield end; a
+  stack with heavy stages attached may hold itself the other way round (Part V4).
+  (Refined by D-36: "the only protection" is not "immunity".)
+- **D-32** **An overheating part destroys that part**, and the stack splits at
+  it into a capsule fragment and uncontrolled fragments (Part F5). Not "the
+  whole rocket explodes" -- the failure unit is the part, and the split reuses
+  the staging path.
+- **D-33** **The actively controlled body is always the capsule's fragment.**
+  Keys, SAS, throttle, staging and auto-guidance apply to it alone; debris is
+  ballistic, uncontrolled, still simulated, still drawn, and capped.
+- **D-28** Music is per context: **menus `brittle_rille.mp3`, Engineering
+  `sneaky_adventure.mp3`, flight above the atmosphere `impact_lento.mp3`**, each
+  looped, each in its own directory on the card (`music/menu/`, `music/engineering/`,
+  `music/space/`) because `se_mp3` plays a directory rather than a file.
+- **D-29** **No music during atmospheric flight** -- pad, ascent, reentry and
+  touchdown are silent. The boundary is the atmosphere (70 km), the switch is
+  edge-triggered with a 60/70 km hysteresis band, swaps fade ~0.5 s rather than
+  cut, and the Audio setting outranks the context rule (Part N4, F-14).
+
+- **D-34** The build screen is called **Engineering**, not a VAB or any other
+  Kerbal name. The screen name, the source directory `main/engineering/`, the
+  perf scene `perf scene=engineering` and the card directory
+  `music/engineering/` all follow it, so there is one word for it everywhere.
+  The Spaceport verb stays **"Build a rocket"**, because the hub lists verbs and
+  the verb opens the Engineering screen (D-24).
+- **D-35** Aerodynamics is **one static margin**: per-part `CdA`, a drag centre
+  as the `CdA`-weighted position, `SM = x_CP - x_CoM`, and torque
+  `q * CdA_total * SM * sin(alpha)` (Part A5). No fins, no airbrakes, no Mach-
+  or Reynolds-dependent `Cd`, no wave drag, no cross-axis coupling. Stability is
+  a property of the mass distribution the blueprint already draws, not a part
+  the player can buy.
+- **D-36** **The heat shield is a factor, not immunity.** The capsule is a part
+  with a `capacity` and a `limit` like every other row, and going fast enough
+  nose-first destroys it and ends the mission (Part A4, F-16). Shield-first is
+  the *stable* attitude, not the safe one; survivability comes from arriving
+  slower, which is the player's job. Shield degradation / ablation is a later
+  refinement, deliberately not in the first cut.
+- **D-37** **Engineering does not predict survivability.** The notes print part
+  ratings (shield factor, rated touchdown speed, thrust, Isp, delta-v) and never
+  a verdict about a flight the player has not flown yet -- no stability verdict,
+  no heat verdict, no "will this reenter" card. Whether a design comes home
+  depends on the mass distribution, the arrival speed and whether the player
+  staged, and that judgement is not a number a post-it can carry (Part B4).
+- **D-38** **Landing legs are a stage parameter and a touchdown rating.**
+  `legs: none / 3 / 4 / 6` on a stage, a mass row per leg, and `rated_v` /
+  `rated_tilt` selecting which of Part A3's thresholds apply to the fragment
+  that lands (Part V7). They exist because Cheese has no atmosphere. No contact
+  mechanics: no crush, no breakage, no per-leg load.
+
+- **D-39** **The virtual graceloader is the default harness for everything
+  that is not a timing question.** Menus, layout, flows, saves, scene
+  composition, primitive counts: iterate them on the PC, where nothing has to
+  be plugged in and nobody has to be at a badge. Frame rate, memory pressure,
+  and every Accept line that says "on the badge" stay on a device. The
+  emulator's fps gets recorded as a number about the interpreter and is never
+  compared against a Part G target.
+
+- **D-40** **One manifest, two repos.** This repo's Makefile knows the
+  emulator's directories and the guest path; the emulator's Makefile knows
+  this repo and stages whatever `metadata/metadata.json` lists. No asset is
+  written down twice, so an install onto a card and an install into the
+  emulator cannot disagree about what is on the card.
+
+- **D-41** **One command, always the same text:** `make emu-test`. No
+  arguments, no pipes, no per-run timeouts. The tests live in
+  `tools/emutests.txt`, one console command per line, each line run in its own
+  launch (the app exits to the launcher when a test ends), and everything the
+  app printed is kept in `results/emulator/latest.log`. A run is reproducible,
+  reviewable in the repo, and identical every time -- which is also what makes
+  it approvable once instead of on every call (F-18). `make emu-run
+  EMU_SECS=n` stays for the interactive window.
+
+---
+
+## Verification
+
+- **Host:** `make check` = `hostpurity` + `nispcheck` (Part H). Seconds, no
+  badge, and it is what actually validates the orbital and rocket maths --
+  nothing about a 38-hour transfer is visible on a 480x800 screen.
+- **Device:** `make cycle TEST="perf scene=<name> secs=20"` for frame rate and
+  phase split; `make testrefs` / `make testcompare` with
+  `TEST="shots scene=<name> ms=..."` for framebuffer-hash regressions on the
+  scripted flight scenes and each menu screen.
+- **Virtual device:** `make emu-test` -- always those three words (D-41). It
+  builds, stages onto `../virtual-tanmatsu-graceloader/sd`, runs every line of
+  `tools/emutests.txt` in its own launch, and leaves the records in
+  `results/emulator/latest.log`. Screens, flows, primitive counts; never frame
+  rate (D-39).
+- **Build hygiene:** `make build` clean with no new warnings, `make verify`
+  (every undefined symbol exists in `fakelib`). `make format` needs a
+  `clang-format` on PATH, which this machine does not have -- formatting is
+  matched by hand against `.clang-format` instead.
+- **By hand:** the user flies it. Each block's Accept line is a thing to do on
+  a badge, not a thing to assert in code, and the first playable flight (block
+  5) is the point at which the design either feels like flying or does not.
+
+## Critical files
+
+- `claudeplans/project.md` -- this document. It is updated as part of the work,
+  not afterwards.
+- `tools/emutests.txt` -- the emulator test manifest: what `make emu-test`
+  runs. A test gets added by editing this file, never by typing a command.
+- `../virtual-tanmatsu-graceloader/Makefile` -- `nisp` in its app list, and the
+  staging that reads this repo's `metadata.json` (D-40).
+- `../virtual-tanmatsu-graceloader/src/shims/console_shim.c` -- the emulator's
+  USB-serial/JTAG backed by stdin, without which `make emu-test` could not
+  reach the app at all (F-17).
+- `main/main.c` -- the mode machine and the frame loop; everything that changes
+  which world is open or whether the port is a video link happens here.
+- `main/sim/` (to be written) -- the sky: `bodies.c` is the table the whole game
+  is built on, `kepler.c` is the arithmetic everything else depends on.
+- `main/rocket/` (to be written) -- `parts.c` is the parts table, `stack.c` is
+  the rigid-body geometry, `budget.c` is the number the builder lives by,
+  `heat.c` is the one per-part state and the rule that splits a rocket.
+- `main/engineering/sheet.c` (to be written) -- the blueprint renderer: paper, pencil
+  strokes, dimension callouts, title block. One function, three sizes (Part B5).
+- `main/map/planner.c` (to be written) -- the auto-planner, and the place where
+  "simplified compared to Kerbal Space Program" is actually implemented.
+- `main/ui/menu.c` -- the title bar, the slots, the settings screens, the pause
+  menu, and the Spaceport hub that the game hangs off.
+- `main/game/scene.c` -- the world as drawn: the island today, the three bodies
+  after step 2.1.
+- `tools/nispcheck.c` (to be written) -- the host harness, and the only thing
+  standing between this project and a plausible-looking wrong solar system.
