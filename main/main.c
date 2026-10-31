@@ -6,7 +6,8 @@
 //  the state machine and the ship:
 //
 //    title    the island drifting past, the wordmark over it, and the
-//             title bar's Play / Settings / Livestream / Quit over that
+//             title bar's Play / Settings / Quit over that (the livestream
+//             is a setting, not a title bar item -- ui/menu.c)
 //    play     the ship and the HUD
 //    paused   the ship frozen under the pause menu
 //
