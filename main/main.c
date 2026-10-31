@@ -87,12 +87,16 @@ static char const TAG[] = "nisp";
 
 // --- Which world the title and the tests stand on -----------------------
 
-// The title screen and the bench flight both need an island that is the
-// same on every badge and every run, so they use a fixed seed rather than
-// the seed of whatever world the player last had open.
-#define BENCH_SEED 0x49534c50u  // "ISLP"
+// One sky for everybody (D-50). The scene is seeded -- the starfield and
+// the surface noise come out of this number -- but the seed is a constant in
+// the program rather than something a player picks or a save carries. The
+// title, the bench flight and every world stand on the same ground, which
+// is also what makes a screenshot of one comparable to a screenshot of
+// another.
+#define NISP_WORLD_SEED 0x4e495350u  // "NISP"
+#define BENCH_SEED NISP_WORLD_SEED
 
-// The deep space behind the island. The stars are geometry, so this is
+// The deep space behind the world. The stars are geometry, so this is
 // only what the scene leaves uncovered.
 #define SKY_ARGB 0xff05070du
 
@@ -358,9 +362,9 @@ static void go_title(void) {
     set_content("title");
 }
 
-// The world is open and nothing is flying: the island from the save's seed,
-// and the Spaceport hub over it (plan 4.7). A world is not a mission --
-// which blueprint leaves the pad is a separate decision the hub makes.
+// The world is open and nothing is flying: the sky, and the Spaceport hub
+// over it (plan 4.7). A world is not a mission -- which blueprint leaves the
+// pad is a separate decision the hub makes.
 static void open_world(int slot, nisp_game_t const* game) {
     s_game = *game;
     s_slot = slot;
@@ -480,7 +484,7 @@ static void handle_cmd(menu_cmd_t const* cmd) {
         }
         case MENU_CMD_CREATE: {
             nisp_game_t game;
-            if (save_new(cmd->slot, cmd->name, cmd->seed, &game)) {
+            if (save_new(cmd->slot, cmd->name, NISP_WORLD_SEED, &game)) {
                 open_world(cmd->slot, &game);
                 flash("A new world");
             } else {
@@ -768,6 +772,10 @@ static void on_update(float dt, void* user) {
     if (frame_dt > 0.1) frame_dt = 0.1;
     s_show_last = now;
 
+    // Whether a menu had the keyboard when this frame started. It is the
+    // only way to tell "the player pressed a key at the menu" apart from
+    // "the player pressed a key at the thing the menu was covering".
+    bool const menu_was = menu_active();
     menu_cmd_t const cmd = menu_update();
     handle_cmd(&cmd);
 
@@ -777,7 +785,16 @@ static void on_update(float dt, void* user) {
     // went down since the last frame" edge is never stale on the frame a
     // menu closes.
     nisp_actions_t const mask    = input_sample();
-    nisp_actions_t const pressed = input_pressed();
+    nisp_actions_t pressed       = input_pressed();
+
+    // THE KEY THAT CLOSED A MENU BELONGS TO THE MENU (D-52). The keyboard is
+    // sampled every frame, menu up or not, so the ENTER that accepted a name
+    // or the ESC that cancelled one arrives as an edge on the very frame the
+    // menu goes away -- and unhandled, the screen underneath acts on it too.
+    // In Engineering that read as "Enter does nothing" (the Name action
+    // re-opened the panel the same frame it closed) and as "Esc leaves
+    // Engineering" from a panel that was only asking for a name.
+    if (menu_was && !menu_active()) pressed = 0;
 
     music_update((float)frame_dt);
 

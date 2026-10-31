@@ -48,6 +48,10 @@ int nisp_control_rcs_modules(nisp_stack_t const* s) {
     for (int i = 0; i < s->stage_count && i < NISP_DESIGN_STAGE_MAX; i++) {
         if (s->rcs[i] && attached[i]) n++;
     }
+    // The pod's own pods count as a module of their own (D-51). That is what
+    // makes a lone capsule -- after a staging, or after everything below it
+    // burned through -- a steerable thing rather than a falling brick.
+    if (s->has_capsule && s->pod_rcs) n++;
     return n;
 }
 

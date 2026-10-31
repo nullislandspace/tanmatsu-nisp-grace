@@ -33,6 +33,12 @@
 // rather than covering the rocket it is describing.
 #define PARAM_SHIFT 90
 
+// The sheet stops short of the bottom of the screen. The strip along the
+// bottom is the actions' (Save / Name / Launch / Back), and a sheet that
+// ran to the last pixel put a rocket's tail, its callouts and its title
+// block on top of them (F-37).
+#define SHEET_H 400
+
 // --- The parameter rows (Part B2's ladders) -----------------------------
 
 typedef enum {
@@ -48,7 +54,25 @@ typedef enum {
     P_ROW_COUNT
 } param_row_t;
 
-static char const* param_label(int row) {
+// The pod's ladder (D-51). It is a separate two-row ladder rather than two
+// more entries in the stage one, because the capsule is not a stage: it has
+// no diameter, no length, no engine and nothing to remove.
+#define P_POD_RCS     0
+#define P_POD_CHUTES  1
+#define P_POD_ROW_COUNT 2
+
+static bool cursor_is_pod(nisp_builder_t const* b) { return b->cursor_stage < 0; }
+
+// How many rows the ladder has, which is the cursor's answer, not a constant.
+static int param_row_count(nisp_builder_t const* b) {
+    return cursor_is_pod(b) ? P_POD_ROW_COUNT : P_ROW_COUNT;
+}
+
+static char const* param_label(nisp_builder_t const* b, int row) {
+    if (cursor_is_pod(b)) {
+        if (row == P_POD_RCS) return "RCS pods";
+        return "Parachutes";
+    }
     switch (row) {
         case P_DIAMETER: return "Diameter";
         case P_LENGTH: return "Length";
@@ -109,7 +133,7 @@ static void recompute(nisp_builder_t* b) {
     nisp_stack_build(&b->design, &b->stack);
     nisp_budget_compute(&b->design, BODY_BOB, &b->budget);
     if (b->cursor_stage >= b->design.stage_count) b->cursor_stage = b->design.stage_count - 1;
-    if (b->param_row >= P_ROW_COUNT) b->param_row = 0;
+    if (b->param_row >= param_row_count(b)) b->param_row = 0;
 }
 
 static void say(nisp_builder_t* b, char const* msg) {
@@ -157,7 +181,13 @@ void nisp_builder_say(nisp_builder_t* b, char const* msg) {
 // --- Editing ------------------------------------------------------------
 
 static void edit_param(nisp_builder_t* b, int dir) {
-    if (b->cursor_stage < 0 || b->cursor_stage >= b->design.stage_count) return;
+    if (cursor_is_pod(b)) {
+        if (b->param_row == P_POD_RCS) b->design.pod_rcs = !b->design.pod_rcs;
+        else b->design.pod_chutes = clampi(b->design.pod_chutes + dir, 1, NISP_CHUTE_MAX);
+        recompute(b);
+        return;
+    }
+    if (b->cursor_stage >= b->design.stage_count) return;
     nisp_stage_t* s = &b->design.stage[b->cursor_stage];
 
     switch (b->param_row) {
@@ -258,8 +288,9 @@ nisp_build_cmd_kind_t nisp_builder_step(nisp_builder_t* b, nisp_actions_t presse
     // while it is open (Part B2: up/down pick the row, left/right step the
     // ladder).
     if (b->params_open) {
-        if (act_held(pressed, NISP_LOOK_UP)) b->param_row = clampi(b->param_row - 1, 0, P_ROW_COUNT - 1);
-        if (act_held(pressed, NISP_LOOK_DOWN)) b->param_row = clampi(b->param_row + 1, 0, P_ROW_COUNT - 1);
+        int const rows = param_row_count(b);
+        if (act_held(pressed, NISP_LOOK_UP)) b->param_row = clampi(b->param_row - 1, 0, rows - 1);
+        if (act_held(pressed, NISP_LOOK_DOWN)) b->param_row = clampi(b->param_row + 1, 0, rows - 1);
         if (act_held(pressed, NISP_LOOK_LEFT)) edit_param(b, -1);
         if (act_held(pressed, NISP_LOOK_RIGHT)) edit_param(b, +1);
         if (act_held(pressed, NISP_CONFIRM)) {
@@ -279,12 +310,12 @@ nisp_build_cmd_kind_t nisp_builder_step(nisp_builder_t* b, nisp_actions_t presse
         case NISP_FOCUS_SHEET:
             if (act_held(pressed, NISP_LOOK_UP)) b->cursor_stage = clampi(b->cursor_stage - 1, -1, b->design.stage_count - 1);
             if (act_held(pressed, NISP_LOOK_DOWN)) b->cursor_stage = clampi(b->cursor_stage + 1, -1, b->design.stage_count - 1);
+            // ENTER edits whatever the cursor is on, the pod included (D-51).
+            // What the pod cannot do is be removed, which is why its ladder
+            // has two rows and no "Remove" one.
             if (act_held(pressed, NISP_CONFIRM)) {
-                if (b->cursor_stage < 0) say(b, "The pod is always on top");
-                else {
-                    b->params_open = true;
-                    b->param_row = 0;
-                }
+                b->params_open = true;
+                b->param_row = 0;
             }
             break;
 
@@ -351,11 +382,12 @@ static void draw_column_titles(pax_buf_t* fb, nisp_builder_t* b) {
 static void draw_parts(pax_buf_t* fb, nisp_builder_t* b) {
     int y = BODY_Y;
 
-    // The pod, above the legend and dimmer than it: always there, never a
-    // row you can pick (Part B3).
+    // The pod, above the legend and dimmer than it: always there, and never
+    // a row you can insert or remove (Part B3). Its two options are edited
+    // on the sheet, where the cursor can be on it (D-51).
     nisp_icon_draw(fb, 8, y, NISP_KIND_CAPSULE, false);
     text(fb, NISP_PENCIL_DIM_ARGB, 13.0f, 8 + NISP_ICON_PX + 8, y + 4, "Command pod");
-    text(fb, NISP_PENCIL_DIM_ARGB, 11.0f, 8 + NISP_ICON_PX + 8, y + 20, "always on top");
+    text(fb, NISP_PENCIL_DIM_ARGB, 11.0f, 8 + NISP_ICON_PX + 8, y + 20, "enter edits it");
     y += 44;
 
     for (int i = 0; i < nisp_legend_count(); i++) {
@@ -368,13 +400,15 @@ static void draw_parts(pax_buf_t* fb, nisp_builder_t* b) {
         y += 40;
     }
 
+    // Short lines, on purpose: this column is 168 px wide and a 12 px
+    // Hershey line of more than ~26 characters walks into the sheet (F-37).
     y += 8;
     text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y, "enter adds it below");
-    text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y + 16, "the stage your cursor is on");
+    text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y + 16, "the cursor's stage");
     y += 44;
 
     text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y, "TAB  focus");
-    text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y + 16, "ESC  back to the spaceport");
+    text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y + 16, "ESC  back");
     text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y + 32, "up/down  move");
     text(fb, NISP_PENCIL_DIM_ARGB, 12.0f, 8, y + 48, "left/right  change");
 }
@@ -397,6 +431,14 @@ static void draw_actions(pax_buf_t* fb, nisp_builder_t* b) {
         text(fb, col, 15.0f, x, y, ACTIONS[i]);
         x += textw(15.0f, ACTIONS[i]) + 22;
     }
+}
+
+static void param_value_pod(nisp_design_t const* d, int row, char* buf, int cap) {
+    if (row == P_POD_RCS) {
+        snprintf(buf, (size_t)cap, "%s", d->pod_rcs ? "yes" : "no");
+        return;
+    }
+    snprintf(buf, (size_t)cap, "%d", clampi(d->pod_chutes, 1, NISP_CHUTE_MAX));
 }
 
 static void param_value(nisp_stage_t const* s, int row, char* buf, int cap) {
@@ -426,11 +468,13 @@ static void param_value(nisp_stage_t const* s, int row, char* buf, int cap) {
 // number the sheet is drawing, and the sheet is redrawn on the same frame
 // the ladder steps (Part B2).
 static void draw_params(pax_buf_t* fb, nisp_builder_t* b) {
-    if (b->cursor_stage < 0 || b->cursor_stage >= b->design.stage_count) return;
-    nisp_stage_t const* s = &b->design.stage[b->cursor_stage];
+    bool const pod = cursor_is_pod(b);
+    if (!pod && b->cursor_stage >= b->design.stage_count) return;
+    nisp_stage_t const* const s = pod ? NULL : &b->design.stage[b->cursor_stage];
+    int const rows = param_row_count(b);
 
     int const x = COL_SHEET_X + 8, y = BODY_Y + 4, w = 176;
-    int const h = 24 + P_ROW_COUNT * 20 + 24;
+    int const h = 24 + rows * 20 + 24;
 
     uint16_t* const px = (uint16_t*)pax_buf_get_pixels(fb);
     uint16_t const fill = direct_565_pack_for(fb, 0xff143f6fu);
@@ -443,19 +487,21 @@ static void draw_params(pax_buf_t* fb, nisp_builder_t* b) {
     direct_565_line(px, x + w - 1, y, x + w - 1, y + h - 1, edge);
 
     char title[48];
-    snprintf(title, sizeof(title), "%s  (stage %d)", nisp_part_row(s->kind)->name,
-             b->design.stage_count - b->cursor_stage);
+    if (pod) snprintf(title, sizeof(title), "%s", "Command pod");
+    else snprintf(title, sizeof(title), "%s  (stage %d)", nisp_part_row(s->kind)->name,
+                  b->design.stage_count - b->cursor_stage);
     text(fb, NISP_PENCIL_ARGB, 14.0f, x + 8, y + 5, title);
 
-    for (int row = 0; row < P_ROW_COUNT; row++) {
+    for (int row = 0; row < rows; row++) {
         int const ry = y + 26 + 20 * row;
         bool const sel = (row == b->param_row);
         uint32_t const col = sel ? NISP_MARK_ARGB : NISP_PENCIL_DIM_ARGB;
         if (sel) text(fb, NISP_MARK_ARGB, 13.0f, x - 12, ry, ">");
-        text(fb, col, 13.0f, x + 8, ry, param_label(row));
+        text(fb, col, 13.0f, x + 8, ry, param_label(b, row));
 
         char val[32];
-        param_value(s, row, val, sizeof(val));
+        if (pod) param_value_pod(&b->design, row, val, sizeof(val));
+        else param_value(s, row, val, sizeof(val));
         text(fb, col, 13.0f, x + w - 8 - textw(13.0f, val), ry, val);
     }
 
@@ -469,7 +515,7 @@ void nisp_builder_draw(pax_buf_t* fb, nisp_builder_t* b) {
     draw_column_titles(fb, b);
     draw_parts(fb, b);
 
-    nisp_rect_t const sheet = {COL_SHEET_X, BODY_Y, COL_SHEET_W, DISPLAY_LOG_H - BODY_Y};
+    nisp_rect_t const sheet = {COL_SHEET_X, BODY_Y, COL_SHEET_W, SHEET_H};
     nisp_sheet_view_t view = nisp_sheet_fit(&b->stack, sheet, b->cursor_stage);
     if (b->params_open) view.axis_x += PARAM_SHIFT;
     nisp_sheet_draw(fb, sheet, &b->stack, view, b->design.name, b->cursor_stage, b->cursor_stage);

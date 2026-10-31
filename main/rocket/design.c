@@ -71,6 +71,8 @@ void nisp_design_init(nisp_design_t* d) {
         .booster_length = 4,          // 3.125 m
         .legs = NISP_LEGS_NONE,
     };
+    d->pod_rcs = false;
+    d->pod_chutes = 1;
     nisp_design_clamp(d);
 }
 
@@ -83,6 +85,7 @@ void nisp_design_demo(nisp_design_t* d) {
     if (d == NULL) return;
     nisp_design_init(d);
     snprintf(d->name, sizeof(d->name), "%s", "DEMO");
+    d->pod_rcs = true;  // a ship nobody has edited yet should be pointable
     d->stage_count = 2;
     d->stage[0] = (nisp_stage_t){
         .kind = NISP_KIND_UPPER,
@@ -107,6 +110,7 @@ void nisp_design_demo(nisp_design_t* d) {
 void nisp_design_clamp(nisp_design_t* d) {
     if (d == NULL) return;
     d->stage_count = clamp_int(d->stage_count, 1, NISP_DESIGN_STAGE_MAX);
+    d->pod_chutes = clamp_int(d->pod_chutes, 1, NISP_CHUTE_MAX);
     for (int i = 0; i < d->stage_count; i++) {
         nisp_stage_t* s = &d->stage[i];
         if (s->kind == NISP_KIND_CAPSULE) s->kind = NISP_KIND_MAIN;
@@ -144,9 +148,16 @@ bool nisp_design_name_ok(char const* name) {
 
 bool nisp_design_insert(nisp_design_t* d, int at, int kind) {
     if (d == NULL || d->stage_count >= NISP_DESIGN_STAGE_MAX) return false;
-    if (at < 0 || at >= d->stage_count) at = d->stage_count;
-    for (int i = d->stage_count; i > at; i--) d->stage[i] = d->stage[i - 1];
-    d->stage[at] = (nisp_stage_t){
+
+    // "Below `at`" means what design.h says it means: the stage the cursor
+    // is on stays where it is and the new one hangs under it. The capsule is
+    // index -1, so directly under the pod is index 0, and an `at` past the
+    // bottom appends. Getting this backwards is what made a new stage land
+    // on top of the one you had just selected.
+    int pos = (at < 0) ? 0 : at + 1;
+    if (pos > d->stage_count) pos = d->stage_count;
+    for (int i = d->stage_count; i > pos; i--) d->stage[i] = d->stage[i - 1];
+    d->stage[pos] = (nisp_stage_t){
         .kind = kind,
         .diameter = 2,
         .length = 6,
@@ -178,6 +189,15 @@ int nisp_design_encode(nisp_design_t const* d, char* buf, int cap) {
 
     char tmp[1024];
     int n = snprintf(tmp, sizeof(tmp), "%s\nname=%s\nstages=%d\n", DESIGN_HEADER, d->name, d->stage_count);
+    // Written clamped (D-51), because decode clamps: a design that never went
+    // through nisp_design_clamp would otherwise write a number the file
+    // cannot say back, and encode -> decode -> encode would not be the same
+    // card twice.
+    int const chutes = clamp_int(d->pod_chutes, 1, NISP_CHUTE_MAX);
+    if (n >= 0 && n < (int)sizeof(tmp)) {
+        n += snprintf(tmp + n, sizeof(tmp) - (size_t)n, "pod_rcs=%d pod_chutes=%d\n", d->pod_rcs ? 1 : 0,
+                      chutes);
+    }
     if (n < 0 || n >= (int)sizeof(tmp)) return -1;
 
     for (int i = 0; i < d->stage_count; i++) {
@@ -198,13 +218,22 @@ int nisp_design_encode(nisp_design_t const* d, char* buf, int cap) {
     return n;
 }
 
+// A key is only a key when it starts a token: at the very start of the
+// text, after a space, or at the start of a line. Without the newline case
+// a key that begins a line -- which is every key that is not on a `stage=`
+// line, `stages=` included -- answers nothing, and the pod's options were
+// silently the defaults on every load (F-38).
+static int token_start(char const* text, char const* p) {
+    return p == text || p[-1] == ' ' || p[-1] == '\n';
+}
+
 static int field_int(char const* text, char const* key, int fallback) {
     char const* p = text;
     size_t const klen = strlen(key);
     while ((p = strstr(p, key)) != NULL) {
         // Only a real `key=` at the start of a token counts, so "len=" does
         // not answer a search for "blen=".
-        if ((p == text || p[-1] == ' ') && p[klen] == '=') {
+        if (token_start(text, p) && p[klen] == '=') {
             return atoi(p + klen + 1);
         }
         p += klen;
@@ -216,7 +245,7 @@ static char const* field_word(char const* text, char const* key, char* out, size
     char const* p = text;
     size_t const klen = strlen(key);
     while ((p = strstr(p, key)) != NULL) {
-        if ((p == text || p[-1] == ' ') && p[klen] == '=') {
+        if (token_start(text, p) && p[klen] == '=') {
             p += klen + 1;
             size_t i = 0;
             while (p[i] != '\0' && p[i] != ' ' && p[i] != '\n' && i + 1 < cap) {
@@ -254,6 +283,10 @@ bool nisp_design_decode(char const* text, nisp_design_t* out) {
     }
 
     d.stage_count = field_int(text, "stages=", 0);
+    // The pod's two knobs. Absent is the default, which is what a blueprint
+    // written before they existed means (D-51).
+    d.pod_rcs = field_int(text, "pod_rcs", 0) != 0;
+    d.pod_chutes = field_int(text, "pod_chutes", 1);
     if (d.stage_count < 1) {
         // A hand-written file with `stage=` lines but no count is still a
         // rocket: count the markers.

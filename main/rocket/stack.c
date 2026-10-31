@@ -8,6 +8,12 @@
 
 #include "sim/units.h"
 
+static int clamp_int(int v, int lo, int hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
 static float clamp01(float v) {
     if (v < 0.0f) return 0.0f;
     if (v > 1.0f) return 1.0f;
@@ -62,6 +68,8 @@ void nisp_stack_build(nisp_design_t const* d, nisp_stack_t* out) {
     if (d == NULL || d->stage_count < 1) return;
 
     out->stage_count = d->stage_count;
+    out->pod_rcs = d->pod_rcs;
+    out->chutes = clamp_int(d->pod_chutes, 1, NISP_CHUTE_MAX);
     out->live_stage = d->stage_count - 1;  // the bottom stage burns first (D-42)
     out->throttle = 0.0f;
 
@@ -78,7 +86,9 @@ void nisp_stack_build(nisp_design_t const* d, nisp_stack_t* out) {
     pod.x0 = x;
     pod.x1 = x + NISP_CAPSULE_LENGTH_M;
     pod.diameter_m = top_d;
-    pod.dry_t = NISP_CAPSULE_MASS_T;
+    // The pod and the two things on it the player can choose (D-51). One
+    // canopy is already inside the row's 1.0 t; the extras are bolted on.
+    pod.dry_t = nisp_pod_mass_t(d->pod_rcs, d->pod_chutes);
     pod.prop_t = 0.0f;
     pod.prop_full_t = 0.0f;
     pod.mass_t = pod.dry_t;
@@ -262,10 +272,12 @@ void nisp_stack_recompute(nisp_stack_t* s) {
 
         if (p->kind == NISP_KIND_CAPSULE && s->parachute) {
             // The canopy streams off the capsule's aft end, so its drag
-            // centre is aft of the body it pulls on (Part A3).
-            cd_a += NISP_CHUTE_CDA_M2;
-            cp += NISP_CHUTE_CDA_M2 * p->x1;
-            cd_a_x2 += NISP_CHUTE_CDA_M2 * p->x1 * p->x1;
+            // centre is aft of the body it pulls on (Part A3). More canopies
+            // is the same area, more times (D-51).
+            float const chute_cd_a = nisp_chute_cd_a(s->chutes);
+            cd_a += chute_cd_a;
+            cp += chute_cd_a * p->x1;
+            cd_a_x2 += chute_cd_a * p->x1 * p->x1;
         }
 
         if (p->igniting && p->engine != NISP_ENGINE_NONE) {
@@ -291,6 +303,7 @@ void nisp_stack_recompute(nisp_stack_t* s) {
     s->cot_x = thrust > 0.0f ? cot / thrust : s->com_x;
     s->isp_s = thrust > 0.0f ? isp / thrust : 0.0f;
     s->has_capsule = capsule;
+    if (!capsule) s->pod_rcs = false;  // no pod, no pod RCS
     s->live_stage = nisp_stack_live_stage(s);
 
     // Transverse moment of inertia: solid cylinders about their own centre,
@@ -434,6 +447,10 @@ bool nisp_stack_split(nisp_stack_t* s, int index, nisp_stack_t* other) {
     memset(&lower, 0, sizeof(lower));
     upper.stage_count = s->stage_count;
     lower.stage_count = s->stage_count;
+    upper.pod_rcs = s->pod_rcs;
+    upper.chutes = s->chutes;
+    lower.pod_rcs = s->pod_rcs;
+    lower.chutes = s->chutes;
     lower.throttle = 0.0f;  // debris does not fire its engines
     for (int i = 0; i < NISP_DESIGN_STAGE_MAX; i++) {
         upper.legs_deployed[i] = s->legs_deployed[i];

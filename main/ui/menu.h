@@ -8,7 +8,7 @@
 //      Play        the save slots, then
 //        a world   its Spaceport: Continue mission / Build a rocket /
 //                  Launch... / Designs... / Rename / Delete
-//        empty     New world: name, seed, Random seed, Create
+//        empty     New world: name, Create
 //      Settings    Controls / Graphics / Audio / Display / Livestream
 //    pause         Resume / Save / Settings / Save and quit / Quit
 //
@@ -54,7 +54,7 @@ typedef enum {
     MENU_CMD_NONE = 0,
     MENU_CMD_PLAY,      // open the world in `slot`: its Spaceport hub opens, the mission does not
     MENU_CMD_CLOSE_WORLD, // the open world was deleted: main.c drops it (plan 1.2)
-    MENU_CMD_CREATE,    // make a world in `slot` from `name` and `seed`, then play it
+    MENU_CMD_CREATE,    // make a world in `slot` from `name`, then play it (D-50)
     MENU_CMD_RESUME,    // close the pause menu, keep flying
     MENU_CMD_SAVE,      // save the open world, stay paused
     MENU_CMD_SAVE_QUIT, // save the open world and go back to the title
@@ -75,7 +75,6 @@ typedef struct {
     // Wide enough for both names a command carries: a world's (NISP_NAME_MAX)
     // and a design's (NISP_DESIGN_NAME_MAX), which is one character longer.
     char            name[32];
-    uint32_t        seed;
 } menu_cmd_t;
 
 // The title's bar (the root menu) or the pause menu. Either replaces

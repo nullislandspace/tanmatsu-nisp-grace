@@ -274,10 +274,10 @@ void hud_draw(pax_buf_t* fb, nisp_game_t const* game, nisp_mission_t const* miss
 
     char line[96];
 
-    // Top left: which world this is.
+    // Top left: which world this is. There is no seed to show any more --
+    // the sky is the same sky for every slot (D-50) -- and block 6 will
+    // fill this corner with the vessel's name instead.
     text(fb, 0xffffffffu, 20.0f, 14.0f, 12.0f, game->name);
-    snprintf(line, sizeof(line), "seed %u", (unsigned)game->seed);
-    text(fb, 0xff9fb0b8u, 13.0f, 14.0f, 36.0f, line);
 
     if (mission == NULL || readout == NULL) return;
 

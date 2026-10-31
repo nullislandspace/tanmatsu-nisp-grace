@@ -59,6 +59,22 @@
 #define NISP_CHUTE_MIN_Q  40.0f
 #define NISP_CHUTE_MAX_V_MS 300.0f
 
+// How many canopies a pod may carry (D-51). One is the default and the
+// number the paragraph above was sized backwards from, so a rocket built
+// before this existed descends exactly as it did. Each extra canopy is the
+// same area more, and a few tens of kilos more.
+#define NISP_CHUTE_MAX        3
+#define NISP_CHUTE_EXTRA_MASS_T 0.05f  // per canopy after the first
+
+// The canopy area a pod of `chutes` parachutes actually drags. 1..NISP_CHUTE_MAX;
+// anything else is read as one.
+float nisp_chute_cd_a(int chutes);
+
+// The pod's mass with the two options the player can give it. rocket/stack
+// and rocket/budget both read this, so the drawing's numbers and the flight's
+// numbers cannot disagree (Part V2).
+float nisp_pod_mass_t(bool pod_rcs, int chutes);
+
 #define NISP_DIAMETER_COUNT 4
 #define NISP_LENGTH_STEP_M 0.625f
 #define NISP_LENGTH_MAX_STEPS 16  // 0.625 m .. 10 m

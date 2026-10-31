@@ -49,6 +49,15 @@ typedef struct {
 typedef struct {
     char name[NISP_DESIGN_NAME_MAX + 1];  // empty until the player names it
     int  stage_count;
+
+    // The capsule is always there and never a stage, but it is not a fixed
+    // part either (D-51): RCS pods and 1..3 parachutes are the player's
+    // call, and they are the only two things Engineering can change about
+    // the pod. Both are the default (no RCS, one chute) when a blueprint
+    // says nothing, which is what keeps an old file an old rocket.
+    bool pod_rcs;
+    int  pod_chutes;  // 1..NISP_CHUTE_MAX
+
     nisp_stage_t stage[NISP_DESIGN_STAGE_MAX];  // 0 = uppermost
 } nisp_design_t;
 
@@ -68,8 +77,10 @@ bool nisp_design_named(nisp_design_t const* d);
 // Letters, digits, space, dash, underscore; 1..NISP_DESIGN_NAME_MAX long.
 bool nisp_design_name_ok(char const* name);
 
-// Insert a stage of `kind` below index `at` (at < 0 appends). False when
-// the stack is full.
+// Insert a stage of `kind` directly below index `at`, so the stage that
+// was at `at` stays where it is and the new one hangs under it. `at < 0`
+// means the capsule: the new stage goes directly under it, at index 0. An
+// `at` past the bottom appends. False when the stack is full.
 bool nisp_design_insert(nisp_design_t* d, int at, int kind);
 // Remove the stage at `at`. False when the stack would be left with none.
 bool nisp_design_remove(nisp_design_t* d, int at);

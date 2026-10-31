@@ -8,7 +8,6 @@
 #include <string.h>
 
 #include "audio/music.h"
-#include "common/rng.h"
 #include "engineering/sheet.h"
 #include "esp_timer.h"
 #include "game/input.h"
@@ -32,9 +31,8 @@ typedef enum {
     SCR_LAUNCH,    // which saved design leaves the pad
     SCR_DESIGNS,   // the blueprints on the card
     SCR_DESIGN,    // one blueprint: Engineering / Rename / Delete
-    SCR_NEW,       // New world: name, seed, Create
+    SCR_NEW,       // New world: name, Create
     SCR_NAME,      // typing a name
-    SCR_SEED,      // typing a seed
     SCR_DELETE,    // are you sure
     SCR_SETTINGS,  // Controls / Graphics / Audio / Display
     SCR_CONTROLS,
@@ -71,8 +69,7 @@ static screen_t parent_of(screen_t s) {
         case SCR_LAUNCH:
         case SCR_DESIGNS: return SCR_WORLD;
         case SCR_DESIGN: return SCR_DESIGNS;
-        case SCR_NAME:
-        case SCR_SEED: return s_edit_return;
+        case SCR_NAME: return s_edit_return;
         case SCR_DELETE: return SCR_WORLD;
         case SCR_SETTINGS: return s_settings_back;
         case SCR_CONTROLS:
@@ -89,7 +86,6 @@ static int s_slot;      // the slot SCR_WORLD and SCR_DELETE are about
 static int s_open_slot = -1;  // the slot main.c has open, -1 when it has none
 static int s_new_slot;  // the slot SCR_NEW will write to
 static char s_new_name[NISP_NAME_MAX];
-static uint32_t s_new_seed;
 
 // The blueprints on the card, read once when a design screen opens -- the
 // same rule as the slots: a menu is not a place to re-read files per frame.
@@ -123,7 +119,6 @@ static nisp_slot_t s_slot_info[NISP_SAVE_SLOTS];
 static char s_slot_label[NISP_SAVE_SLOTS][64];
 static char s_title[64];
 static char s_subtitle[64];
-static char s_seed_text[16];
 static char s_key_name[NISP_ACTION_COUNT][12];
 
 // --- News -----------------------------------------------------------------
@@ -172,7 +167,7 @@ static void begin(char const* title, char const* subtitle, char const* hint) {
 // --- The screens ----------------------------------------------------------
 
 static int build_worlds(void) {
-    begin("Play", "A world is a seed and a pose. Three slots.", "up/down choose   enter opens   esc back");
+    begin("Play", "A world is a name and a pose. Three slots.", "up/down choose   enter opens   esc back");
     for (int i = 0; i < NISP_SAVE_SLOTS; i++) {
         if (s_slot_info[i].exists) {
             char stamp[24];
@@ -283,16 +278,15 @@ static int build_design(void) {
     return 4;
 }
 
+// There is no seed row (D-50): every world stands on the same island, so
+// the only thing a new world needs from the player is what to call it.
 static int build_new(void) {
-    snprintf(s_seed_text, sizeof(s_seed_text), "%u", (unsigned)s_new_seed);
     snprintf(s_title, sizeof(s_title), "New world in slot %d", s_new_slot + 1);
-    begin(s_title, "A seed builds the island. The name is yours.", "enter edits   esc cancels");
+    begin(s_title, "The island is the same one. The name is yours.", "enter edits   esc cancels");
     s_rows[0] = (se_menu_row_t){.label = "Name", .kind = SE_MENU_VAL_TEXT, .value = s_new_name};
-    s_rows[1] = (se_menu_row_t){.label = "Seed", .kind = SE_MENU_VAL_TEXT, .value = s_seed_text};
-    s_rows[2] = (se_menu_row_t){.label = "Random seed", .kind = SE_MENU_VAL_NONE};
-    s_rows[3] = (se_menu_row_t){.label = "Create", .kind = SE_MENU_VAL_NONE};
-    s_rows[4] = (se_menu_row_t){.label = "Cancel", .kind = SE_MENU_VAL_NONE};
-    return 5;
+    s_rows[1] = (se_menu_row_t){.label = "Create", .kind = SE_MENU_VAL_NONE};
+    s_rows[2] = (se_menu_row_t){.label = "Cancel", .kind = SE_MENU_VAL_NONE};
+    return 3;
 }
 
 // The typing screens have no rows: the text IS the screen, drawn by
@@ -312,11 +306,6 @@ static int build_name(void) {
         title = "World name";
     }
     begin(title, subtitle, "type   enter accepts   esc cancels   bksp erases");
-    return 0;
-}
-
-static int build_seed(void) {
-    begin("Seed", "Digits only.", "type   enter accepts   esc cancels   bksp erases");
     return 0;
 }
 
@@ -454,7 +443,6 @@ static int build_rows(screen_t s) {
         case SCR_DESIGN: return build_design();
         case SCR_NEW: return build_new();
         case SCR_NAME: return build_name();
-        case SCR_SEED: return build_seed();
         case SCR_DELETE: return build_delete();
         case SCR_SETTINGS: return build_settings();
         case SCR_CONTROLS: return build_controls();
@@ -493,16 +481,9 @@ static int first_empty_slot(void) {
     return 0;
 }
 
-// A seed nobody will type: the clock, mixed. rng_mix64 is the stateless
-// mixer, so this needs no rng_init and disturbs no sequence.
-static uint32_t fresh_seed(void) {
-    return (uint32_t)rng_mix64((uint64_t)esp_timer_get_time() ^ 0x9E3779B97F4A7C15ull);
-}
-
 static void open_new(int slot) {
     s_new_slot = slot;
     snprintf(s_new_name, sizeof(s_new_name), "%s", "Null Island");
-    s_new_seed = fresh_seed();
     s_cursor[SCR_NEW] = 0;
     go(SCR_NEW);
 }
@@ -563,10 +544,6 @@ static void edit_char(char c) {
     // A name is short on purpose: it goes into a save header and onto a
     // menu row, and both have a width.
     if (s_scr == SCR_NAME && len >= NISP_NAME_MAX - 1) return;
-    if (s_scr == SCR_SEED) {
-        if (c < '0' || c > '9') return;
-        if (len >= 9) return;  // fits in a uint32 with room to spare
-    }
     s_edit[len] = c;
     s_edit[len + 1] = '\0';
 }
@@ -578,9 +555,7 @@ static void edit_erase(void) {
 }
 
 static void edit_commit(menu_cmd_t* cmd) {
-    if (s_scr == SCR_SEED) {
-        if (s_edit[0] != '\0') s_new_seed = (uint32_t)strtoul(s_edit, NULL, 10);
-    } else if (s_edit_kind == EDIT_RENAME_WORLD) {
+    if (s_edit_kind == EDIT_RENAME_WORLD) {
         if (s_edit[0] != '\0' && save_rename(s_slot, s_edit)) {
             menu_status_set("Renamed");
             refresh_slots();
@@ -720,8 +695,8 @@ static void activate(menu_cmd_t* cmd) {
             if (row < NISP_SAVE_SLOTS) {
                 if (s_slot_info[row].exists) {
                     // Opening a world is main.c's business: the save is read,
-                    // the island is built from its seed, and the hub opens on
-                    // top of it (plan 4.7).
+                    // the island is built from it, and the hub opens on top of
+                    // it (plan 4.7).
                     cmd->kind = MENU_CMD_PLAY;
                     cmd->slot = row;
                 } else {
@@ -809,16 +784,9 @@ static void activate(menu_cmd_t* cmd) {
             if (row == 0) {
                 open_edit(SCR_NAME, SCR_NEW, EDIT_NEW_WORLD, s_new_name);
             } else if (row == 1) {
-                snprintf(s_edit, sizeof(s_edit), "%u", (unsigned)s_new_seed);
-                open_edit(SCR_SEED, SCR_NEW, EDIT_NEW_WORLD, s_seed_text);
-            } else if (row == 2) {
-                s_new_seed = fresh_seed();
-                menu_status_set("A new seed");
-            } else if (row == 3) {
                 cmd->kind = MENU_CMD_CREATE;
                 cmd->slot = s_new_slot;
                 snprintf(cmd->name, sizeof(cmd->name), "%s", s_new_name);
-                cmd->seed = s_new_seed;
             } else {
                 refresh_slots();
                 go(SCR_WORLDS);
@@ -940,7 +908,7 @@ menu_cmd_t menu_update(void) {
     // The typing screens are not lists: every key is a character or one of
     // accept / cancel / erase, and none of it goes through the engine's
     // cursor.
-    if (s_scr == SCR_NAME || s_scr == SCR_SEED) {
+    if (s_scr == SCR_NAME) {
         for (int i = 0; i < s_typed_n; i++) edit_char(s_typed[i]);
         if (s_pending & ACT_BKSP) edit_erase();
         s_pending &= ~ACT_BKSP;
@@ -1041,7 +1009,7 @@ void menu_draw(pax_buf_t* fb) {
         return;
     }
     se_menu_draw(&s_menu, fb);
-    if (s_scr == SCR_NAME || s_scr == SCR_SEED) draw_edit(fb);
+    if (s_scr == SCR_NAME) draw_edit(fb);
 }
 
 // --- Opening, closing, and the test kit's shortcuts -----------------------

@@ -208,6 +208,18 @@ static void legs(pax_buf_t* fb, uint16_t c, int cx, int half_w, int y0, int y1, 
     }
 }
 
+// The canopies a pod carries, drawn as packs stowed in its aft end: one
+// shallow arc each, nested outward (D-51). Only when the pod is tall enough
+// for the arcs to be separate lines rather than one smudge.
+static void chutes(pax_buf_t* fb, uint16_t c, int cx, int half_w, int y1, int n) {
+    if (n < 2 || half_w < 3) return;
+    for (int i = 0; i < n - 1; i++) {
+        int const y = y1 - 4 - 3 * i;
+        line(fb, c, cx - half_w, y, cx, y - 3);
+        line(fb, c, cx, y - 3, cx + half_w, y);
+    }
+}
+
 // RCS pods at the shoulders of the stage they belong to.
 static void rcs(pax_buf_t* fb, uint16_t c, int cx, int half_w, int y0) {
     for (int s = -1; s <= 1; s += 2) {
@@ -245,6 +257,10 @@ static void draw_stack(pax_buf_t* fb, nisp_stack_t const* s, nisp_sheet_view_t c
             default:
                 if (p->stage < 0) {
                     capsule(fb, c, cx, half, y0, y1);
+                    // The pod's two options, on the drawing (D-51): pods at
+                    // its shoulders, canopy packs in its aft end.
+                    if (s->pod_rcs) rcs(fb, c, cx, half, y0 + (2 * (y1 - y0)) / 5);
+                    chutes(fb, c, cx, half, y1, s->chutes);
                 } else {
                     cylinder(fb, c, cx, half, y0, y1);
                     if (p->engine_count > 0) bell(fb, c, cx, y1, half, p->engine_count);
@@ -327,7 +343,19 @@ static void draw_title_block(pax_buf_t* fb, nisp_rect_t r, nisp_sheet_view_t con
                              nisp_stack_t const* s) {
     uint16_t const c = pen(fb, NISP_PENCIL_ARGB);
     int const bw = 176, bh = 62;
-    int const bx = r.x + r.w - bw - 8, by = r.y + r.h - bh - 8;
+    int const bx = r.x + r.w - bw - 4, by = r.y + r.h - bh - 8;
+
+    // A clear area first (F-37). A drawing's title block is never something
+    // the object is drawn over, and filling it with the paper's own blue is
+    // how this renderer keeps that promise without clipping the rocket: a
+    // wide stage's tail may reach here, and it stops at the block's edge
+    // rather than running through the numbers.
+    uint16_t* const px = (uint16_t*)pax_buf_get_pixels(fb);
+    uint16_t const paper = pen(fb, NISP_BLUEPRINT_ARGB);
+    direct_565_tri(px, (float)bx, (float)by, (float)(bx + bw), (float)by, (float)(bx + bw),
+                   (float)(by + bh), paper);
+    direct_565_tri(px, (float)bx, (float)by, (float)(bx + bw), (float)(by + bh), (float)bx,
+                   (float)(by + bh), paper);
 
     rect(fb, c, bx, by, bw, bh);
     line(fb, c, bx, by + 20, bx + bw - 1, by + 20);

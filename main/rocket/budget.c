@@ -112,7 +112,7 @@ void nisp_budget_compute(nisp_design_t const* d, int body, nisp_budget_t* out) {
 
     // Everything attached at the pad, and everything that stays attached
     // above a stage: the mass a stage has to push.
-    float total = NISP_CAPSULE_MASS_T;
+    float total = nisp_pod_mass_t(d->pod_rcs, d->pod_chutes);
     for (int i = 0; i < n; i++) {
         total += mass[i].prop_t + mass[i].dry_t + mass[i].boosters_prop_t + mass[i].boosters_dry_t +
                  mass[i].separator_t;
@@ -135,7 +135,7 @@ void nisp_budget_compute(nisp_design_t const* d, int body, nisp_budget_t* out) {
 
         // The mass this stage ignites with: the capsule, every stage above it,
         // and itself -- full, with its boosters and its separators.
-        float m0 = NISP_CAPSULE_MASS_T;
+        float m0 = nisp_pod_mass_t(d->pod_rcs, d->pod_chutes);
         for (int j = 0; j <= i; j++) {
             m0 += mass[j].prop_t + mass[j].dry_t + mass[j].boosters_prop_t + mass[j].boosters_dry_t +
                   mass[j].separator_t;

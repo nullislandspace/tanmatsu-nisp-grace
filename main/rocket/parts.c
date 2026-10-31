@@ -54,6 +54,19 @@ static nisp_legs_row_t const LEGS[NISP_LEGS_COUNT] = {
     {6, 1.80f, 20.0f, 25.0f, 2.4f},
 };
 
+float nisp_chute_cd_a(int chutes) {
+    if (chutes < 1) chutes = 1;
+    if (chutes > NISP_CHUTE_MAX) chutes = NISP_CHUTE_MAX;
+    return NISP_CHUTE_CDA_M2 * (float)chutes;
+}
+
+float nisp_pod_mass_t(bool pod_rcs, int chutes) {
+    if (chutes < 1) chutes = 1;
+    if (chutes > NISP_CHUTE_MAX) chutes = NISP_CHUTE_MAX;
+    return NISP_CAPSULE_MASS_T + (pod_rcs ? NISP_RCS_MASS_T : 0.0f) +
+           NISP_CHUTE_EXTRA_MASS_T * (float)(chutes - 1);
+}
+
 nisp_legs_row_t const* nisp_legs_row(int id) {
     if (id < 0 || id >= NISP_LEGS_COUNT) id = NISP_LEGS_NONE;
     return &LEGS[id];

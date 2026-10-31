@@ -2025,6 +2025,216 @@ static void case13_missions(void) {
     hovering_is_a_control_problem();
 }
 
+// =====================================================================
+// case 14 -- the blueprint: where a stage lands, and what a pod may be
+// ---------------------------------------------------------------------
+// Everything Engineering lets a player do is arithmetic one level down:
+// where an inserted stage ends up, what the pod's two options weigh and
+// drag, and whether they survive a trip to the card. Checked here, so the
+// sheet only has to draw an answer that is already right.
+// =====================================================================
+
+static nisp_design_t marked_design(void) {
+    // Three main stages, each identifiable by its length in ladder steps
+    // (1, 2, 3), so an insert can be seen to have landed where it claims.
+    nisp_design_t d = {0};
+    d.stage_count = 3;
+    for (int i = 0; i < d.stage_count; i++) {
+        d.stage[i].kind = NISP_KIND_MAIN;
+        d.stage[i].diameter = 2;
+        d.stage[i].length = i + 1;
+        d.stage[i].engine = NISP_ENGINE_SKIPPER;
+        d.stage[i].engine_count = 1;
+    }
+    return d;
+}
+
+static void insert_lands_below_the_cursor(void) {
+    // A stage this function inserts is 6 ladder steps long, which none of
+    // the marked ones are, so the new one is visible in the pattern.
+    struct { int at; int want[4]; char const* what; } rows[] = {
+        {-1, {6, 1, 2, 3}, "the cursor is on the pod: the new stage is index 0"},
+        {0, {1, 6, 2, 3}, "the cursor's stage stays on top"},
+        {1, {1, 2, 6, 3}, "the new stage hangs under the cursor's stage"},
+        {2, {1, 2, 3, 6}, "the bottom stage stays at the bottom"},
+        {3, {1, 2, 3, 6}, "a cursor past the bottom appends"},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        nisp_design_t d = marked_design();
+        CHECK_MSG(nisp_design_insert(&d, rows[i].at, NISP_KIND_MAIN), rows[i].what);
+        CHECK(d.stage_count == 4, "an insert adds exactly one stage");
+        bool placed = true;
+        for (int k = 0; k < 4; k++) {
+            if (d.stage[k].length != rows[i].want[k]) placed = false;
+        }
+        CHECK(placed, "and nothing else moved");
+    }
+
+    nisp_design_t full = marked_design();
+    while (full.stage_count < NISP_DESIGN_STAGE_MAX) {
+        if (!nisp_design_insert(&full, full.stage_count - 1, NISP_KIND_UPPER)) break;
+    }
+    CHECK(full.stage_count == NISP_DESIGN_STAGE_MAX, "a stack fills to NISP_DESIGN_STAGE_MAX");
+    CHECK(!nisp_design_insert(&full, 0, NISP_KIND_MAIN), "a full stack refuses a new stage");
+    CHECK(full.stage_count == NISP_DESIGN_STAGE_MAX, "and refusing changes nothing");
+
+    nisp_design_t d = marked_design();
+    CHECK(!nisp_design_remove(&d, -1), "the pod is not a stage, so it is not removable");
+    CHECK(!nisp_design_remove(&d, 3), "an index past the bottom removes nothing");
+    CHECK(nisp_design_remove(&d, 1), "a stage in the middle comes out");
+    CHECK(d.stage_count == 2 && d.stage[0].length == 1 && d.stage[1].length == 3, "and the others close up");
+
+    nisp_design_t one = marked_design();
+    while (one.stage_count > 1) {
+        if (!nisp_design_remove(&one, 0)) break;
+    }
+    CHECK(one.stage_count == 1, "stages come off one at a time");
+    CHECK(!nisp_design_remove(&one, 0), "a rocket is never left with no stages");
+}
+
+static void pod_options_cost_what_they_say(void) {
+    CHECK_NEAR(nisp_pod_mass_t(false, 1), 1.00, 1e-6, "a plain pod, t");
+    CHECK_NEAR(nisp_pod_mass_t(true, 1), 1.10, 1e-6, "a pod with RCS pods, t");
+    CHECK_NEAR(nisp_pod_mass_t(true, 3), 1.20, 1e-6, "RCS pods and three canopies, t");
+    CHECK_NEAR(nisp_pod_mass_t(false, 0), 1.00, 1e-6, "no canopies reads as one, t");
+    CHECK_NEAR(nisp_pod_mass_t(false, 9), 1.10, 1e-6, "nine canopies reads as three, t");
+
+    CHECK_NEAR(nisp_chute_cd_a(1), 300.0, 1e-6, "one canopy drags, m^2");
+    CHECK_NEAR(nisp_chute_cd_a(3), 900.0, 1e-6, "three canopies drag, m^2");
+    CHECK_NEAR(nisp_chute_cd_a(0), 300.0, 1e-6, "a pod with no canopy still drags one");
+
+    // The same numbers, through the stack the flight actually uses: the
+    // sheet's post-it and the physics tick read one source (Part V2).
+    nisp_design_t d = marked_design();
+    nisp_stack_t s;
+    nisp_stack_build(&d, &s);
+    float const plain_mass = s.mass_t;
+    float const plain_cd_a = s.cd_a_total;
+
+    d.pod_rcs = true;
+    d.pod_chutes = 3;
+    nisp_stack_build(&d, &s);
+    CHECK(s.pod_rcs && s.chutes == 3, "the stack carries the pod's options");
+    CHECK_NEAR(s.mass_t - plain_mass, 0.20, 1e-4, "what the two options weigh, t");
+    CHECK(s.cd_a_total == plain_cd_a, "and add no drag while nothing is deployed");
+
+    // Deployed, the canopies are the same area three times over, and they
+    // hang off the capsule's end -- which is the top of this rocket, so the
+    // drag centre moves up it and the static margin goes negative. That is
+    // not a bug: a negative margin is Part A5's weathervane pointing the
+    // other way, which is exactly what a canopy does to the thing under it.
+    float pod_end = 0.0f;
+    for (int i = 0; i < s.count; i++) {
+        if (s.part[i].kind == NISP_KIND_CAPSULE) pod_end = s.part[i].x1;
+    }
+    float const stowed = s.cd_a_total, stowed_cp = s.cp_x;
+    CHECK(stowed_cp > pod_end, "with no canopy the drag centre is down the rocket");
+    s.parachute = true;
+    nisp_stack_recompute(&s);
+    CHECK_NEAR(s.cd_a_total - stowed, 900.0, 1e-3, "three canopies deployed, m^2");
+    CHECK_NEAR(s.cp_x, (stowed * stowed_cp + 900.0 * pod_end) / (stowed + 900.0), 1e-3,
+               "the canopy drags at the capsule's end, m");
+    CHECK(s.cp_x < stowed_cp, "so the drag centre moves up the rocket");
+    CHECK(s.static_margin_m < 0.0f, "and a chuted stack weathervanes chute-first");
+
+    // What the extra 0.1 t of canopies buys, in the one number a player
+    // cares about: the speed it arrives at. Terminal speed is
+    // sqrt(2 m g / (rho CdA)) at sea level, and this stack's mass is a hand
+    // sum -- 11.0447 t of propellant (0.4 * pi * 1.25^2 * 5.625 m), 8 % of
+    // it dry, three 0.90 t Skippers, three 0.05 t separators, and the 1.20 t
+    // pod -- 15.9782 t.
+    double const rho = nisp_atm_density(BODY_BOB, 0.0f);
+    CHECK_NEAR((double)s.mass_t, 15.9782, 1e-3, "this stack's mass, t");
+    double const weight = 2.0 * (double)s.mass_t * 1000.0 * nisp_body_g0(BODY_BOB);
+    double const v3 = sqrt(weight / (rho * (double)s.cd_a_total));
+
+    nisp_design_t one = marked_design();
+    one.pod_chutes = 1;
+    nisp_stack_t s1;
+    nisp_stack_build(&one, &s1);
+    s1.parachute = true;
+    nisp_stack_recompute(&s1);
+    double const v1 = sqrt(weight / (rho * (double)s1.cd_a_total));
+
+    CHECK(v3 < v1, "three canopies land it slower than one");
+    CHECK_NEAR(v1 / v3, sqrt((double)s.cd_a_total / (double)s1.cd_a_total), 1e-3,
+               "slower by the square root of the area it adds");
+    CHECK_NEAR(v3, 16.59, 0.02, "three canopies, m/s");
+    CHECK_NEAR(v1, 27.87, 0.02, "one canopy, m/s");
+}
+
+static void pod_options_survive_the_card(void) {
+    nisp_design_t d = marked_design();
+    snprintf(d.name, sizeof(d.name), "%s", "PODTEST");
+    d.pod_rcs = true;
+    d.pod_chutes = 3;
+
+    char text[1024];
+    char text2[1024];
+    int const n1 = nisp_design_encode(&d, text, (int)sizeof(text));
+    CHECK(n1 > 0, "a pod with options encodes");
+    nisp_design_t back = {0};
+    CHECK(nisp_design_decode(text, &back), "and decodes");
+    CHECK(back.pod_rcs, "the RCS pods survive the card");
+    CHECK(back.pod_chutes == 3, "so do three canopies");
+    int const n2 = nisp_design_encode(&back, text2, (int)sizeof(text2));
+    CHECK(n1 == n2 && memcmp(text, text2, (size_t)n1) == 0, "encode -> decode -> encode is byte-identical");
+
+    // An unclamped design must still write a file it can read back: encode
+    // clamps, because decode does (F-37).
+    nisp_design_t wild = marked_design();
+    wild.pod_chutes = 99;
+    char text3[1024];
+    int const n3 = nisp_design_encode(&wild, text3, (int)sizeof(text3));
+    nisp_design_t tamed = {0};
+    CHECK(n3 > 0 && nisp_design_decode(text3, &tamed), "an out-of-range canopy count still round-trips");
+    CHECK(tamed.pod_chutes == NISP_CHUTE_MAX, "and comes back as three");
+
+    // A blueprint written before the pod had options: the line is simply
+    // absent, and absent is the default (D-51).
+    char const* cut = strstr(text, "pod_rcs=");
+    CHECK(cut != NULL, "the pod line is in the file");
+    char old[1024];
+    size_t const head = (size_t)(cut - text);
+    size_t const tail = strlen(strchr(cut, '\n') + 1);
+    memcpy(old, text, head);
+    memcpy(old + head, strchr(cut, '\n') + 1, tail);
+    old[head + tail] = '\0';
+    nisp_design_t aged = {0};
+    CHECK(nisp_design_decode(old, &aged), "a file with no pod line still loads");
+    CHECK(!aged.pod_rcs && aged.pod_chutes == 1, "and means a plain pod, exactly as before");
+    CHECK(aged.stage_count == d.stage_count, "with every stage it had");
+}
+
+static void pod_pods_count_as_control(void) {
+    nisp_design_t d = control_design(0);  // three stages, no RCS anywhere
+    d.pod_rcs = true;
+    nisp_stack_t s;
+    nisp_stack_build(&d, &s);
+    CHECK(nisp_control_rcs_modules(&s) == 1, "a pod with pods has one module of its own");
+    CHECK_NEAR(nisp_control_authority_knm(&s, true), 15.0, 1e-6, "authority it buys, kN*m");
+
+    // The point of putting them on the pod: they are the last thing left,
+    // after every stage below has staged or burned through (Part F5).
+    for (int i = 0; i < NISP_DESIGN_STAGE_MAX; i++) nisp_stack_advance(&s);
+    CHECK(s.has_capsule, "the pod is all that is left");
+    CHECK(nisp_control_rcs_modules(&s) == 1, "and it still has something to push with");
+    CHECK_NEAR(nisp_control_authority_knm(&s, true), 15.0, 1e-6, "authority on the pod alone, kN*m");
+
+    nisp_design_t const plain = control_design(0);
+    nisp_stack_build(&plain, &s);
+    CHECK(nisp_control_rcs_modules(&s) == 0, "a plain pod has nothing to push with");
+    CHECK_NEAR(nisp_control_authority_knm(&s, true), 0.0, 1e-9, "zero is zero");
+}
+
+static void case14_blueprint(void) {
+    printf("case 14  the blueprint: insert position, and the pod's two options\n");
+    insert_lands_below_the_cursor();
+    pod_options_cost_what_they_say();
+    pod_options_survive_the_card();
+    pod_pods_count_as_control();
+}
+
 int main(void) {
     printf("nispcheck  --  Null Island Space Program, host harness\n\n");
 
@@ -2049,6 +2259,8 @@ int main(void) {
     case12_control_sas();
     printf("\n");
     case13_missions();
+    printf("\n");
+    case14_blueprint();
     printf("\n");
 
     if (s_fail) {

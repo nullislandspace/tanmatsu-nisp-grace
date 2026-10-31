@@ -148,7 +148,7 @@ static int pod_card(pax_buf_t* fb, nisp_rect_t r, nisp_stack_t const* s, int* y_
     c.x = r.x + 6;
     c.y = *y_out;
     c.w = r.w - 12;
-    c.h = CARD_TITLE_H + CARD_ROW_H * 4 + 6;
+    c.h = CARD_TITLE_H + CARD_ROW_H * 5 + 6;
     c.tilt = 3;
     c.fill = CARD_MANILA;
     c.corner = 0xffc9a86au;
@@ -172,7 +172,12 @@ static int pod_card(pax_buf_t* fb, nisp_rect_t r, nisp_stack_t const* s, int* y_
         snprintf(val, sizeof(val), "%.0f %% facing", (double)pod->shield * 100.0);
         card_row(fb, &c, 2, "heat shield", val);
     }
-    card_row(fb, &c, 3, "parachute", "integrated");
+    // The pod's two options, printed as the numbers they are (D-51). A
+    // canopy's rating is its area, which is part data; what the fragment
+    // does with it on the way down is not printed here (D-37).
+    snprintf(val, sizeof(val), "x%d integrated", s->chutes);
+    card_row(fb, &c, 3, "parachutes", val);
+    card_row(fb, &c, 4, "RCS pods", s->pod_rcs ? "yes" : "no");
 
     *y_out = c.y + c.h + 10;
     return 1;

@@ -534,7 +534,8 @@ The player cannot drag parts around. A rocket is a **stack described by
 numbers**, built top-down:
 
 ```
-capsule            always exactly one, always on top
+capsule            always exactly one, always on top; RCS pods yes/no,
+                   and 1..3 parachutes
   stage 1          the uppermost engine stage
   stage 2
   ...
@@ -543,6 +544,13 @@ each stage: diameter, length, engine type, engine count, RCS?,
             side boosters (0 / 2 / 4) and their size,
             landing legs (none / 3 / 4 / 6)
 ```
+
+The capsule is the one part that is never in the legend and never
+removable, and it is not a fixed part either: RCS pods and 1..3 parachutes
+are the player's two knobs on it, and the only two things Engineering can
+change about it (**D-51**). No pods and one canopy is the default, and the
+default is also what a blueprint written before they existed means, so an
+old rocket flies exactly as it did.
 
 Stage separators are implicit: a stage boundary *is* a separator, and it
 exists whether or not the player thought about it (**D-21**). Side
@@ -857,7 +865,9 @@ shoulder button) cycles.
 
 ```
 BLUEPRINT focus   up/down     stage cursor; the sheet scrolls to keep it visible
-                  Enter       open the selected stage's parameter editor
+                  Enter       open the parameter editor -- the cursor's
+                              stage, or the pod when the cursor is above
+                              every stage
                   add / del   insert a stage below the cursor / remove it
 PARTS focus       up/down     part cursor in the legend, which scrolls
                   Enter       insert that part as a stage below the cursor
@@ -886,7 +896,7 @@ lists **stage types**, not attachments:
 
 | legend row | what it inserts |
 |---|---|
-| Command pod | the top of every stack; always present, never removable, not in the scrollable list |
+| Command pod | the top of every stack; always present, never removable, not in the scrollable list. Enter on it opens its two options (RCS pods, parachutes) rather than inserting anything |
 | Main stage | engine + propellant: the workhorse |
 | Upper stage | a vacuum-optimised engine, thin walls, small diameter |
 | Booster stage | solid: heavy thrust, no throttle, burns out on its own |
@@ -1225,7 +1235,7 @@ owns them -- same rule as SynthMiner, same reason.
 
 | path | what |
 |---|---|
-| `/sd/nisp/saves/save<n>.bin` | the slot: seed (kept for the title's island until it goes away), the mission state, the flown rocket's design id, apoapsis reached, missions completed |
+| `/sd/nisp/saves/save<n>.bin` | the slot: the seed field (kept so an old slot still loads; the world itself comes from the fixed internal seed, **D-50**), the mission state, the flown rocket's design id, apoapsis reached, missions completed |
 | `/sd/nisp/designs/<name>.nbp` | rocket blueprints, shared between slots |
 | `/sd/nisp/settings.txt` | settings and bindings |
 | `/sd/nisp/test/` | test-kit shots |
@@ -1431,8 +1441,16 @@ answer next to it:
     at 8.8 m/s, a Cheese landing that survives on legs and is a crater without
     them, a 250 x 20 km reentry that kills the capsule and a 250 x 60 km one
     that never gets hot, and a hover that is really a control test.
+14. **The blueprint as an editor**: where an inserted stage lands (below the
+    cursor, at index 0 when the cursor is on the pod, appended past the
+    bottom, refused when full), what the pod's two options weigh and drag
+    (1.00 / 1.10 / 1.20 t, 300 / 900 m^2, terminal speed by the square root
+    of the area they add), that they survive `encode -> decode -> encode`
+    byte for byte, that a file without them means the default, and that the
+    pod's own pods are a control module of their own after everything below
+    has gone.
 
-Cases 1-6 and 9-13 are in `tools/nispcheck.c` today (383 checks). Cases 7 and 8
+Cases 1-6 and 9-14 are in `tools/nispcheck.c` today (446 checks). Cases 7 and 8
 are written down before they exist, because they are the acceptance test for the
 planner in block 8 -- the planner gets written when its test is already
 described.
@@ -1449,12 +1467,14 @@ The middle row is new (F-17, D-39) and it is the one most of blocks 4, 6,
 7 and 9 will actually be iterated in: the same `app.so`, the same install
 path, the same `@@SR-*@@` records, no badge in reach.
 
-The reference set, from the manifest run of 2026-11-01 (the 2026-10-31 set was
-superseded by the Spaceport hub, which moves the menu tree): `engineering`
-`51270ab0` (the same hash at t = 0 and t = 1.5 s, i.e. the sheet is a still
-drawing), `spaceport` `ce74b7e9`, `designs` `9346e1a9`, `settings` `011bbebf`,
-`graphics` `5900eaf1`, `audio` `a5a2facf`, `display` `ea95f026`. The title is
-not in the set and cannot be until step 10.5 (F-19).
+The reference set, from the manifest run of 2026-11-01 (the previous set was
+superseded by the fixed internal seed, which regenerates the starfield every
+screen draws its panel over, and by the sheet's new bottom edge): `engineering`
+`e66d7b09` (the same hash at t = 0 and t = 1.5 s, i.e. the sheet is a still
+drawing), `spaceport` `7ecbfbb8`, `designs` `187ab4c4`, `settings` `96b6ddd7`,
+`graphics` `fe500731`, `audio` `7b6eccff`, `display` `3b272a56`. Two runs of
+the manifest in a row produced all eight hashes identically. The title is not
+in the set and cannot be until step 10.5 (F-19).
 
 ---
 
@@ -1521,7 +1541,9 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 4.7 | The Spaceport hub screen, hung off the existing slot menu (Part N1) | done | 2026-11-01. Seven rows -- Continue mission, Build a rocket, Launch..., Designs..., Rename, Delete, Back -- with the pickers as their own screens (`SCR_LAUNCH`, `SCR_DESIGNS`, `SCR_DESIGN`) carrying 34x34 blueprint thumbnails. Opening a world opens its hub and launches nothing (D-49); the hub is a `main.c` mode (`MODE_WORLD`), not a menu detail. |
 | 4.8 | Measure: `perf scene=engineering`, and decide there whether the sheet needs caching into a layer | done | 2026-11-01. `perf scene=engineering`: 29.76 fps average (27.3..32.7), 66 tris, `rast` 0 -- the cost is entirely `draw` at 9.9..13.6 ms, and the frame is identical at t=0 and t=1.5 s (`51270ab0`), so nothing is being recomputed per frame. No caching into a layer yet. The >= 40 fps target is unmeasured on the badge (D-39). |
 | 4.9 | `music/engineering/` playlist: `sneaky_adventure.mp3` looped while Engineering is up, back to the menu track when it closes; Makefile stem lists and `metadata.json` extended | done | 2026-11-01. `MUSIC_ENGINEERING` is a context in `main/audio/music.h` alongside NONE / MENU / SPACE, set in `open_engineering()` and restored to MENU on the way out. `sneaky_adventure.mp3` and its license are in `music/engineering/` and go up with `make install`. |
-| | **Accept:** build a rocket on the badge that Part 3's budget says can reach 100 km, name it, launch it -- and the screen reads as a blueprint, not a menu | in progress | The blueprint half is settled: the emulator's engineering shot is 63 % blue paper, 5 % post-it, 2 % pencil, and it reads as a drawing rather than a list. The badge half is owed -- a person has to build a rocket on hardware, launch it, and measure the >= 40 fps target there. |
+| 4.10 | The pod's two options: RCS pods on/off, 1..3 parachutes, edited from the sheet and drawn on it | done | 2026-11-01. `pod_rcs` / `pod_chutes` in the design, the stack and the file; `nisp_pod_mass_t` and `nisp_chute_cd_a` in `parts.c` so the cost is one place; case 14 measures 1.00 / 1.10 / 1.20 t and 27.87 / 16.59 m/s. The decoder bug this exposed is F-38 (D-51). |
+| 4.11 | The first badge hand-test of Engineering: four fixes and the fixed internal seed | done | 2026-11-01. The pod was not editable, the name dialog could not be closed, an inserted stage landed above the cursor, and the sheet's bottom edge collided with the actions. All four fixed on the badge report; `NISP_WORLD_SEED` replaces the typed seed (D-50, D-52, F-37, F-38). |
+| | **Accept:** build a rocket on the badge that Part 3's budget says can reach 100 km, name it, launch it -- and the screen reads as a blueprint, not a menu | in progress | The blueprint half is settled, on hardware: the user built, named and edited rockets on a badge and the screen reads as a drawing rather than a list. What that test produced was 4.10 and 4.11 rather than a pass. Still owed: the >= 40 fps measurement on the badge (D-39), and a rocket that actually reaches 100 km from a badge launch, which needs block 6's HUD to fly. |
 | **5** | **Flight physics** | | |
 | 5.1 | `flight/physics.{c,h}`: rigid-body state, quaternion attitude, velocity-Verlet at `dt_phys` 0.02 s | done | 2026-11-01. `main/flight/physics.c` (904 lines) and `main/common/quat.c` (164 lines), `NISP_PHYS_DT 0.02`. One body per fragment (D-22); a split goes through the staging path, not a second code path (D-32). |
 | 5.2 | Thrust at CoT, `(CoT - CoM) x F` torque, staging, separators, booster burn-out and separation | done | 2026-11-01. Thrust is applied at the stack's CoT and the torque is the lever arm crossed with it; CoM and CoT are recomputed every tick as propellant drains, so a stage that is half empty pushes differently than the same stage full. Side boosters burn out on their own clock and shed themselves mid-burn (F-25, D-42). |
@@ -1929,6 +1951,28 @@ document if it ever happens:
   angle)`, chased) holds at exactly the authority limit: 0.0862 rad/s, 629
   frames, no overshoot.
 
+- **F-37** 2026-11-01: **the bottom edge of the sheet was a fight for the same
+  pixels.** The sheet used to run to the last row of the screen, so its title
+  block sat at x = 408..584, y = 410..472 while the action row (`Save`, `Name`,
+  `Launch`, `Back`) was drawn at y = 458 across x = 178..420 -- straight through
+  the block's left border and its numbers. The parts column had the same
+  problem in miniature: a 12 px help line of more than about 26 characters walks
+  past x = 168 into the paper. Both are one mistake -- the drawing was allowed
+  to be as tall as the screen, leaving everything that belongs *under* it
+  nowhere to go. Fixed by `SHEET_H 400` (the paper now ends at y = 444 and the
+  actions have a strip of their own), by filling the title block with the
+  paper's own blue before its border and text (a wide stage's tail stops at the
+  block instead of running through it), and by short help strings.
+
+- **F-38** 2026-11-01: **a key at the start of a line was never found.** The
+  blueprint decoder matched a field name only when the byte before it was a
+  space, so any key that begins a line silently returned its default:
+  `stages=`, `pod_rcs=`, `pod_chutes=`. The bug predates the pod options -- it
+  just never mattered, because the fields that happened to start a line were
+  ones whose default was also what was written. Found by case 14's
+  `encode -> decode -> encode` check, which is the only test in the harness
+  that asks the file a question rather than the maths.
+
 ### Decisions
 
 - **D-01** The game is **Null Island Space Program**, motto *"To nowhere, and
@@ -2135,6 +2179,27 @@ document if it ever happens:
   because it is where the game decides which mission or design the next verb
   applies to (Part N1, D-24).
 
+- **D-50** **The world has one fixed internal seed, `NISP_WORLD_SEED`.** There
+  is no seed to type and no seed screen: the sky is the same sky for every
+  player, and the number exists so the starfield and the surface noise are
+  reproducible rather than so they can vary. The seed field stays in the save
+  file so a slot written before this decision still loads (Part N3).
+- **D-51** **The command pod has exactly two options: RCS pods, and 1..3
+  parachutes.** They are edited on the sheet, with the cursor parked above
+  every stage, because the pod is not a stage -- no diameter, no length, no
+  engine, nothing to remove. Each one is worth what it says it is: 0.10 t for
+  the pods (one control module, 15 kN m, and the pod still has it after
+  everything below has burnt away), 0.05 t per extra canopy for 300 m^2 apiece,
+  which drops the touchdown speed by `sqrt(area)` -- 27.87 m/s under one canopy
+  against 16.59 m/s under three. No pods and one canopy is the default, and the
+  default is also what a blueprint written before they existed means, so an old
+  rocket flies exactly as it did.
+- **D-52** **The key press that closes a menu belongs to the menu.** A dialog
+  that closes on ENTER must not hand that same ENTER to the mode underneath it,
+  and one that closes on ESC must not travel two levels up in the same frame.
+  `main.c` samples the keys only when the menu was closed at the start of the
+  frame, which is what makes a dialog closeable at all.
+
 ---
 
 ## Verification
@@ -2178,7 +2243,8 @@ document if it ever happens:
 - `main/rocket/` -- `parts.c` is the parts table and the Engineering legend,
   `stack.c` is the rigid-body geometry and the static margin, `budget.c` is the
   number the builder lives by, `heat.c` is the one per-part state and the rule
-  that splits a rocket.
+  that splits a rocket, `design.c` is the blueprint in RAM and the file format
+  that has to survive being read back (F-38).
 - `main/flight/` -- `physics.c` is the tick (forces, torque caps, heat, SOI),
   `mission.c` is the ship plus its debris and its music context, `warp.c` is the
   ladder and its refusals, `control.c` is RCS authority and the SAS switching
@@ -2192,5 +2258,5 @@ document if it ever happens:
   menu, and the Spaceport hub that the game hangs off.
 - `main/game/scene.c` -- the world as drawn: three lit spheres and a starfield,
   camera-relative metres, the LOD ladder.
-- `tools/nispcheck.c` -- the host harness, 13 cases, and the only thing standing
+- `tools/nispcheck.c` -- the host harness, 14 cases, and the only thing standing
   between this project and a plausible-looking wrong solar system.

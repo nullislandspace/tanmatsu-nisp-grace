@@ -103,9 +103,11 @@ int save_slot_peek(int slot, nisp_slot_t* out) {
     out->exists = peek.exists;
     snprintf(out->info, sizeof(out->info), "%s", peek.info);
     out->timestamp = peek.timestamp;
-    // The seed is not in the peek, and a slot list should still say which
-    // island it is. A peek is already a file open; this is a second one,
-    // a few times a session, which is what a menu costs.
+    // The seed and the name are not in the peek, so a slot list has to open
+    // the file to say what the player called it. A peek is already a file
+    // open; this is a second one, a few times a session, which is what a
+    // menu costs. The seed is read out alongside them only because the
+    // field is there and an old slot has one (D-50).
     nisp_game_t g;
     if (save_load(slot, &g)) {
         out->seed = g.seed;

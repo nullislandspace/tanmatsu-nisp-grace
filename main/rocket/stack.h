@@ -114,6 +114,8 @@ typedef struct {
     float thrust_kn;         // the igniting engines, this instant
     float isp_s;             // thrust-weighted, for the HUD's accel number
     bool  has_capsule;
+    bool  pod_rcs;           // the capsule's own RCS pods (D-51)
+    int   chutes;            // 1..NISP_CHUTE_MAX canopies on the pod
     bool  parachute;         // the capsule's integrated chute, deployed
 } nisp_stack_t;
 
@@ -174,9 +176,9 @@ bool nisp_stack_split(nisp_stack_t* s, int index, nisp_stack_t* other);
 int nisp_stack_drop_stage(nisp_stack_t* s, int stage);
 
 // The chute is part of the capsule (Part V1), so deploying it is a flag on
-// the stack rather than a part: it puts NISP_CHUTE_CDA_M2 of drag at the
-// capsule's aft end, which moves the drag centre aft and makes the fragment
-// fly shield-first (Part A3).
+// the stack rather than a part: it puts nisp_chute_cd_a(chutes) of drag at
+// the capsule's aft end, which moves the drag centre aft and makes the
+// fragment fly shield-first (Part A3).
 void nisp_stack_deploy_chute(nisp_stack_t* s, bool deployed);
 
 void nisp_stack_deploy_legs(nisp_stack_t* s, int stage, bool deployed);
