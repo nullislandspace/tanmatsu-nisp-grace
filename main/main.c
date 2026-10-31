@@ -11,7 +11,7 @@
 //    play     the mission, the chase camera on the ship, and the HUD
 //    paused   the mission frozen under the pause menu
 //    world    a save is open and nothing is flying: the Spaceport hub
-//             (ui/menu.c) over the drifting island
+//             (ui/menu.c) over the drifting sky
 //    engineering  the blueprint sheet (engineering/builder.c), the one
 //             screen in the game that is not the 3D scene at all
 //
@@ -103,7 +103,7 @@ static char const TAG[] = "nisp";
 // --- The state ----------------------------------------------------------
 
 typedef enum {
-    MODE_TITLE = 0,    // the island drifts; the title bar sits over it
+    MODE_TITLE = 0,    // the sky drifts; the title bar sits over it
     MODE_PLAY,         // the ship has the keyboard
     MODE_PAUSED,       // the ship is frozen; the pause menu has it
     MODE_WORLD,        // a save is open, nothing is flying: the Spaceport hub
@@ -890,7 +890,7 @@ static void on_render(pax_buf_t* fb, void* user) {
 
     // The sky. The engine would have cleared `fb`, but when the scene
     // draws into the half-size layer it is that buffer which needs a
-    // background: whatever the island does not cover is what shows through
+    // background: whatever the planets do not cover is what shows through
     // the upscale.
     prof_begin(PROF_FILL);
     if (half) {
@@ -904,7 +904,7 @@ static void on_render(pax_buf_t* fb, void* user) {
     }
     prof_end(PROF_FILL);
 
-    // The island, behind everything: the title's drift, the ship's view,
+    // The sky, behind everything: the title's drift, the ship's view,
     // and the frozen view a menu sits on. It times its own phases.
     int const view =
         (s_mode == MODE_TITLE || s_mode == MODE_WORLD) ? NISP_VIEW_COUNT - 1 : settings_view();

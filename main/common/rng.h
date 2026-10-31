@@ -4,9 +4,9 @@
 // ---------------------------------------------------------------------
 //  splitmix64: six lines, no state beyond one 64-bit word, and good
 //  enough statistics for a starfield or a survey grid. Everything the
-//  world is made of comes out of a seed, so a save that stores its seed
-//  rebuilds the same island exactly -- which is also what makes a
-//  screenshot hash a meaningful regression test (testkit/devtest.h).
+//  world is made of comes out of a seed, so the same seed rebuilds the
+//  same sky exactly -- which is also what makes a screenshot hash a
+//  meaningful regression test (testkit/devtest.h).
 //
 //  rng_hash() is the stateless form: the same (seed, a, b) always gives
 //  the same value, so per-cell noise needs no iteration order.

@@ -7,10 +7,11 @@
 //  keeps the game's own schema and the two questions the menus ask --
 //  what is in a slot, and what to do about it.
 //
-//  A save holds a SEED and a pose, not a world. The island is rebuilt
-//  from the seed (common/rng.h), so a save is a sentence rather than a
-//  megabyte -- and it stays that way however big the world gets, because
-//  only what the player CHANGED will ever need to be written down.
+//  A save holds a name and a pose, not a world. The sky is generated
+//  from a fixed seed (D-50) rather than stored, so a save is a sentence
+//  rather than a megabyte -- and it stays that way however big the world
+//  gets, because only what the player CHANGED will ever need to be
+//  written down.
 //
 //  Deleting a slot reaches into the engine's file naming: se_save.c
 //  spells a slot as "<dir>/save<slot>.bin". That is not public API, so

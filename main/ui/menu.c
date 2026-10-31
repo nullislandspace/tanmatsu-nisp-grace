@@ -278,11 +278,11 @@ static int build_design(void) {
     return 4;
 }
 
-// There is no seed row (D-50): every world stands on the same island, so
+// There is no seed row (D-50): every world stands under the same sky, so
 // the only thing a new world needs from the player is what to call it.
 static int build_new(void) {
     snprintf(s_title, sizeof(s_title), "New world in slot %d", s_new_slot + 1);
-    begin(s_title, "The island is the same one. The name is yours.", "enter edits   esc cancels");
+    begin(s_title, "Same sky for every world. The name is yours.", "enter edits   esc cancels");
     s_rows[0] = (se_menu_row_t){.label = "Name", .kind = SE_MENU_VAL_TEXT, .value = s_new_name};
     s_rows[1] = (se_menu_row_t){.label = "Create", .kind = SE_MENU_VAL_NONE};
     s_rows[2] = (se_menu_row_t){.label = "Cancel", .kind = SE_MENU_VAL_NONE};
@@ -695,7 +695,7 @@ static void activate(menu_cmd_t* cmd) {
             if (row < NISP_SAVE_SLOTS) {
                 if (s_slot_info[row].exists) {
                     // Opening a world is main.c's business: the save is read,
-                    // the island is built from it, and the hub opens on top of
+                    // the sky is built from it, and the hub opens on top of
                     // it (plan 4.7).
                     cmd->kind = MENU_CMD_PLAY;
                     cmd->slot = row;
@@ -969,7 +969,7 @@ static void draw_edit(pax_buf_t* fb) {
 }
 
 // The title's own row: a strip along the bottom, under the wordmark, so the
-// island and the logo stay in view. Every other screen is a panel over them.
+// planet and the logo stay in view. Every other screen is a panel over them.
 static void draw_title_bar(pax_buf_t* fb) {
     float const h   = 26.0f;
     float const gap = 48.0f;
