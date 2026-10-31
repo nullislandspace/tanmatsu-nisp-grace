@@ -7,30 +7,71 @@ endif()
 
 project(app C)
 
+# --- Which build is this (main/app_version.h.in) -------------------------
+#
+# The commit and the minute of the build, plus the release out of
+# metadata/metadata.json — the file the repository and every installed
+# badge already go by. They land in a generated header the app reads
+# through main/common/build_id.h, which is what the title screen shows and
+# what tools/testrun.py refuses to test a mismatch against.
+find_program(GIT_EXE git)
+if(GIT_EXE)
+    execute_process(COMMAND ${GIT_EXE} describe --always --dirty --abbrev=10
+                    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                    OUTPUT_VARIABLE APP_GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET)
+endif()
+if(NOT APP_GIT_HASH)
+    set(APP_GIT_HASH "unknown")
+endif()
+string(TIMESTAMP APP_BUILD_TIME "%Y-%m-%dT%H:%M:%SZ" UTC)
+
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/metadata/metadata.json APP_METADATA)
+string(JSON APP_VERSION GET ${APP_METADATA} version)
+if(NOT APP_VERSION)
+    set(APP_VERSION "")
+endif()
+message(STATUS "Null Island Space Program ${APP_VERSION} (${APP_GIT_HASH}, ${APP_BUILD_TIME})")
+
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/main/app_version.h.in
+               ${CMAKE_BINARY_DIR}/generated/app_version.h @ONLY)
+
 # App source files — add your .c files here
 set(APP_SOURCES
     main/main.c
     main/crt0.c
+    main/audio/music.c
+    main/common/rng.c
+    main/common/vfs_compat.c
+    main/save/save.c
+    main/ui/settings.c
+    main/ui/logo.c
+    main/ui/title.c
+    main/ui/menu.c
+    main/game/input.c
+    main/game/scene.c
+    main/game/hud.c
 )
 
 # Automated device tests (main/testkit/, README "Automated device tests").
 # Opt-in: uncomment to build them in, and set where shots go. An app
 # without SynthEngine3D adds TESTKIT_NO_ENGINE to the definitions.
-# list(APPEND APP_SOURCES
-#     main/testkit/debugcon.c
-#     main/testkit/devtest.c
-#     main/testkit/profile.c
-#     main/testkit/report.c
-#     main/testkit/screenshot.c
-#     main/testkit/showtime.c
-# )
-# add_compile_definitions(SCREENSHOT_DIR="/sd/myapp")
+list(APPEND APP_SOURCES
+    main/testkit/debugcon.c
+    main/testkit/devtest.c
+    main/testkit/profile.c
+    main/testkit/report.c
+    main/testkit/screenshot.c
+    main/testkit/showtime.c
+)
+add_compile_definitions(SCREENSHOT_DIR="/sd/nisp/test")
 
 # Include directories — add paths to your headers here
 set(APP_INCLUDES
     main
     include
     include/esp_additions/include
+    ${CMAKE_BINARY_DIR}/generated
 )
 
 # Compile app sources as a relocatable object library

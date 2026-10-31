@@ -2,6 +2,121 @@
 
 This template project shows how to build an app for Tanmatsu using [Graceloader](https://github.com/nullislandspace/tanmatsu-graceloader)
 
+## Null Island Space Program
+
+*To nowhere, and beyond!* — a ship, an island at 0°N 0°E, and not much else.
+This repository is the template turned into that game: SynthEngine3D as a
+submodule, the flight, the menus, saves, settings, the livestream, and the
+device test kit wired to a scripted flight path.
+
+The island is one small fixed mesh submitted in full every frame. There is no
+chunk streaming here, whatever SynthMiner does.
+
+### Where the files live
+
+| Path | What |
+|---|---|
+| `/sd/apps/at.cavac.nisp/` | the install: `app.so`, `metadata.json`, `nullislandlogo_ball.png`, `music/` |
+| `/sd/nisp/saves/` | the three save slots |
+| `/sd/nisp/settings.txt` | settings and key bindings |
+| `/sd/nisp/test/` | test-kit screenshots (`SCREENSHOT_DIR`) |
+
+Player data is deliberately outside the install directory — the launcher owns
+that and may empty it on an update — so copying `/sd/nisp` is the whole backup
+(`main/common/paths.h`).
+
+### The logo
+
+`nullislandlogo_ball.png` is data, not code. `make install` uploads it beside
+`app.so` and `metadata/metadata.json` lists it as an asset, so the artwork can
+be redrawn without rebuilding anything. `main/ui/logo.c` decodes it once at
+boot, scales it down to the size the title draws it at (`LOGO_DRAW_H`), and
+throws the 3.5 MB original away: every frame after that is a blit, not a
+resample. What it keeps is packed for the blit -- the framebuffer's own RGB565
+halfwords laid out column by column, each column trimmed to the rows the
+artwork actually touches, with its fully opaque middle recorded as a run.
+Drawing it is then 341 contiguous sweeps of the framebuffer: stores for the
+middle, a blend for the soft edge, nothing at all for the transparent corners.
+Alpha survives the packing because the ball is round and the framebuffer has no
+alpha to keep a soft edge with; on a display that is not RGB565 / `PAX_O_ROT_CW`
+the layer stays ARGB8888 and `logo_draw()` falls back to `pax_draw_image()`. If
+the file is missing the title falls back to the wordmark alone.
+
+The title's artwork is timed as its own profiler phase (`logo`), because
+blitting 341x340 pixels is an order of magnitude more work than the few hundred
+pixels of text the rest of the overlay is.
+
+`se_splash()` — the SynthEngine3D logo, the same way SynthMiner shows it — is
+the first thing `on_init()` does, before the scene, the bindings, the saves or
+the title exist.
+
+### Music and licenses
+
+The menu plays a recording rather than a generator: `brittle_rille.mp3`,
+looped, out of `music/menu/` beside `app.so`. The engine's MP3 source plays
+every `.mp3` in the directory it is handed and cannot be pointed at one file,
+which is why the menu's track has a directory of its own while the rest of the
+shipped music sits in `music/` until something wants it (`main/audio/music.c`).
+A card with no music falls back to the procedural generator rather than to
+silence.
+
+All three tracks are Kevin MacLeod (incompetech.com) under Creative Commons
+Attribution 4.0. Each `.mp3` has a `.txt` beside it carrying the license, and
+that file is uploaded with the track; Settings → Audio shows the attribution
+line for whatever is playing, and **Next track** moves to the next one in the
+playlist.
+
+### Menu structure
+
+```
+title bar   a strip along the bottom: Play / Settings / Quit
+  Play      the three slots
+    a world   Play / Rename / Delete
+    empty     New world: name, seed, Random seed, Create
+  Settings  Controls / Graphics / Audio / Display / Livestream
+pause       Resume / Save / Settings / Save and quit / Quit
+```
+
+The title bar is a bar rather than a panel, so it does not cover the logo and
+the wordmark; `>` marks the chosen item and the arrow keys move along it. Every
+other screen is a panel drawn by the engine's list menu. The livestream is a
+setting rather than a title-bar item: it takes the USB-C port away from the
+debug console, so it belongs where a person has to open the panel to find it.
+
+The menu decides, `main/main.c` acts: anything that changes which world is
+open, whether the ship is flying, or whether the USB-C port is a video link
+comes back from `menu_update()` as a `MENU_CMD_*`. Settings and bindings are
+the menu's own business and never reach `main.c`.
+
+### Controls
+
+All of them remappable under Settings → Controls (`main/game/input.c`):
+`WASD` thrust, `Space`/`Left Shift` up and down, `Right Shift` boost, cursor
+keys look, `Esc` pause, `F2` save, `Backspace` position/diagnostics, `0`
+screenshot.
+
+### Testing it on a badge
+
+```sh
+make push                                          # app.so only -- the fast path
+make install                                       # app.so + the logo + the music
+make cycle TEST="perf scene=space secs=20"         # frame rate, phase split, primitive counts
+make cycle TEST="shots scene=title ms=0,2500"      # render exact instants, save PNGs + hashes
+make testrefs   TEST="shots scene=space secs=20"   # store those hashes
+make testcompare TEST="shots scene=space secs=20"  # regression test against them
+```
+
+`install` sends every file every time — there is no stamp for "already sent",
+because a cache of what this checkout last uploaded is a cache about the card it
+uploaded to. `push` sends `app.so` and nothing else, which is what iterating on
+code needs; run `install` when the artwork or the music actually changed.
+
+`scene=` takes `title`, `space`, or any menu name (`worlds`, `settings`,
+`controls`, `pause`, ...). A flight steered by a stick cannot be a pure
+function of the clock, so the kit flies a scripted path instead (`bench_pose`)
+— which makes the same run a regression test of the renderer, the HUD and the
+menus. See "Automated device tests" below.
+
 ## 3D: SynthEngine3D
 
 [SynthEngine3D](https://github.com/nullislandspace/synthengine3D) is the 3D engine for

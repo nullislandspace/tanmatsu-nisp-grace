@@ -8,9 +8,26 @@ BADGELINKPORT ?=
 SHELL := /usr/bin/env bash
 
 # App installation settings
-APP_SLUG_NAME ?= tld.username.gracetemplate
-APP_INSTALL_BASE_PATH ?= /int/apps/
+# The slug the launcher knows this app by, and where it lives on the card.
+# /sd/apps/ rather than /int/apps/: the game's own data is /sd/nisp, and a
+# player who wants to back everything up copies one card, not two
+# partitions (main/common/paths.h).
+APP_SLUG_NAME ?= at.cavac.nisp
+APP_INSTALL_BASE_PATH ?= /sd/apps/
 APP_INSTALL_PATH = $(APP_INSTALL_BASE_PATH)$(APP_SLUG_NAME)
+
+# The shipped music (music/). Everything in that directory goes onto the
+# card under the app's own music directory, EXCEPT the tracks named in
+# MUSIC_MENU_STEMS, which go into music/menu/ instead: se_mp3 plays every
+# .mp3 in the directory it is given and has no way to be pointed at one
+# file, so a track that belongs to one place lives in a directory of its
+# own (main/audio/music.h). The .txt beside each track is its license and
+# travels with it. metadata.json lists the same files by hand -- add a
+# track to both, or the app repository install comes up without it.
+MUSIC_ALL := $(notdir $(wildcard music/*))
+MUSIC_MENU_STEMS := brittle_rille
+MUSIC_MENU := $(foreach f,$(MUSIC_ALL),$(if $(filter $(MUSIC_MENU_STEMS),$(basename $(f))),$(f)))
+MUSIC_POOL := $(filter-out $(MUSIC_MENU),$(MUSIC_ALL))
 
 # ESP-IDF tools path (needed for the RISC-V cross-compiler)
 IDF_PATH ?= $(shell cat .IDF_PATH 2>/dev/null || echo `pwd`/esp-idf)
@@ -105,20 +122,50 @@ badgelink:
 BADGELINK_CONN := $(if $(BADGELINKPORT),$(if $(findstring :,$(BADGELINKPORT)),--tcp $(BADGELINKPORT),--port $(BADGELINKPORT)),)
 
 .PHONY: install
+# INSTALL PUTS EVERY FILE ON THE DEVICE, EVERY TIME: the app, the artwork,
+# the music and its licenses. There is no stamp for "already sent" -- a
+# cache keyed on what this checkout last uploaded is a cache about the card
+# it was uploaded to, and when it is wrong the app comes up with no artwork
+# and no music for a reason nothing on screen can explain. `make push` is
+# the fast path for iterating on code.
+
+# $(1) = local path, $(2) = remote path
+define UPLOAD
+	@echo "  upload $(1)"
+	@( cd badgelink/tools && ./badgelink.sh $(BADGELINK_CONN) fs upload $(2) ../../$(1) ) || exit 1
+endef
+
+# The fast path: app.so and nothing else. A code change does not need the
+# 9 MB of music re-sent, and `install` is for when the assets actually
+# changed.
+.PHONY: push
+push: build
+	@echo "=== Pushing app.so ==="
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/app.so ../../$(BUILD)/app.so
+	@echo "=== Pushed (assets untouched -- 'make install' for those) ==="
+
 install: build
 	@echo "=== Installing to device ==="
-	@echo "Creating directory $(APP_INSTALL_PATH)..."
 	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH) || true
-	@echo "Uploading metadata.json..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/metadata.json ../../metadata/metadata.json
-	@echo "Uploading icon16.png..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon16.png ../../metadata/icon16.png
-	@echo "Uploading icon32.png..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon32.png ../../metadata/icon32.png
-	@echo "Uploading icon64.png..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/icon64.png ../../metadata/icon64.png
-	@echo "Uploading app.so..."
-	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/app.so ../../$(BUILD)/app.so
+	$(call UPLOAD,metadata/metadata.json,$(APP_INSTALL_PATH)/metadata.json)
+	$(call UPLOAD,metadata/icon16.png,$(APP_INSTALL_PATH)/icon16.png)
+	$(call UPLOAD,metadata/icon32.png,$(APP_INSTALL_PATH)/icon32.png)
+	$(call UPLOAD,metadata/icon64.png,$(APP_INSTALL_PATH)/icon64.png)
+	# The title screen's logo (ui/logo.h). Data, not a blob in the binary:
+	# it goes onto the card beside app.so, where it can be replaced without
+	# rebuilding anything. Listed in metadata.json's assets, so an install
+	# from the app repository brings it along too.
+	$(call UPLOAD,nullislandlogo_ball.png,$(APP_INSTALL_PATH)/nullislandlogo_ball.png)
+	$(call UPLOAD,$(BUILD)/app.so,$(APP_INSTALL_PATH)/app.so)
+	@echo "Music: $(words $(MUSIC_ALL)) file(s) -- $(words $(MUSIC_MENU)) in music/menu, $(words $(MUSIC_POOL)) in music"
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH)/music >/dev/null 2>&1 || true
+	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) fs mkdir $(APP_INSTALL_PATH)/music/menu >/dev/null 2>&1 || true
+	@for m in $(MUSIC_MENU); do \
+	  ( cd badgelink/tools && ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/music/menu/$$m ../../music/$$m >/dev/null ) || exit 1; \
+	done
+	@for m in $(MUSIC_POOL); do \
+	  ( cd badgelink/tools && ./badgelink.sh $(BADGELINK_CONN) fs upload $(APP_INSTALL_PATH)/music/$$m ../../music/$$m >/dev/null ) || exit 1; \
+	done; echo "  $(words $(MUSIC_ALL)) music file(s) sent"
 	@echo "=== Installation complete ==="
 
 GRACELOADER_SLUG ?= at.cavac.graceloader
@@ -167,12 +214,19 @@ APP_REPO_PATH ?= ../tanmatsu-app-repository/$(APP_SLUG_NAME)
 .PHONY: apprepo
 apprepo: build
 	@echo "=== Updating app repository ==="
-	mkdir -p $(APP_REPO_PATH)
+	mkdir -p $(APP_REPO_PATH)/music/menu
 	cp metadata/metadata.json $(APP_REPO_PATH)/metadata.json
 	cp metadata/icon16.png $(APP_REPO_PATH)/icon16.png
 	cp metadata/icon32.png $(APP_REPO_PATH)/icon32.png
 	cp metadata/icon64.png $(APP_REPO_PATH)/icon64.png
 	cp $(BUILD)/app.so $(APP_REPO_PATH)/app.so
+	# Everything metadata.json promises. It lists the logo and the music,
+	# so a repository that carries only app.so installs an app with no
+	# artwork and no music.
+	cp nullislandlogo_ball.png $(APP_REPO_PATH)/nullislandlogo_ball.png
+	@for m in $(MUSIC_MENU); do cp music/$$m $(APP_REPO_PATH)/music/menu/$$m || exit 1; done
+	@for m in $(MUSIC_POOL); do cp music/$$m $(APP_REPO_PATH)/music/$$m || exit 1; done
+	@echo "  $(words $(MUSIC_ALL)) music file(s) copied"
 	@echo "=== App repository updated at $(APP_REPO_PATH) ==="
 
 # Preparation

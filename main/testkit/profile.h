@@ -34,6 +34,14 @@ typedef enum {
     PROF_WAIT,      // backdrop_finish: fills still running when the CPU was done, plus the CPU's share (horizon wedge,
                     // fallback)
     PROF_RASTER,    // scene_rasterize: flat triangles, textured ones, then edges
+    PROF_OVERLAY,   // the full-resolution drawing on top of the world:
+                    // wordmark, HUD, menu panel. Half resolution cannot
+                    // reach any of it, which is why it is its own phase.
+    PROF_LOGO,      // the title's artwork, on its own because it is the
+                    // one overlay item big enough to be worth naming:
+                    // 341 columns x 340 rows of blitted pixels, against a
+                    // few hundred pixels of text. Not inside PROF_OVERLAY,
+                    // so the two numbers add up instead of nesting.
     PROF_BLIT,      // engine present: frame handed to the LCD (se_present_stats)
     PROF_VSYNC,     // engine present: idle until the tearing-effect signal
     PROF_COUNT,
