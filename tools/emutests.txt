@@ -1,0 +1,27 @@
+# Emulator test manifest -- what `make emu-test` runs.
+#
+# One line per test, in order. Each line is exactly one command for the app's
+# debug console (main/testkit/devtest.h), and each gets its own launch of
+# ../virtual-tanmatsu-graceloader because the app exits to the launcher when a
+# test ends. Blank lines and lines starting with # are ignored.
+#
+#   RUN perf  scene=<name> [secs=<n>]  frames, phase split, primitive counts
+#   RUN shots scene=<name> ms=<ms>,..  PNGs + framebuffer hashes, sd/nisp/test/
+#
+# Scenes today: title, space (the flight bench), and every menu screen --
+# worlds, world, new, delete, settings, controls, graphics, audio, display,
+# pause.
+#
+# Shot targets are stamp-free screens only. The title draws APP_BUILD_TIME, so
+# its hash changes on every rebuild while nothing about the screen did (F-19);
+# it stays here as a perf target, which does not care about pixels.
+#
+# Read the split and the counts here, not the fps: this is an RV32 interpreter
+# on a PC, not the badge (D-39).
+
+RUN perf scene=title secs=6
+RUN perf scene=space secs=6
+RUN shots scene=settings ms=0
+RUN shots scene=graphics ms=0
+RUN shots scene=audio ms=0
+RUN shots scene=display ms=0

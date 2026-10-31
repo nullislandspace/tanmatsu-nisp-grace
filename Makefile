@@ -174,6 +174,97 @@ GRACELOADER_SLUG ?= at.cavac.graceloader
 run:
 	cd badgelink/tools; ./badgelink.sh $(BADGELINK_CONN) start $(GRACELOADER_SLUG) $(APP_INSTALL_PATH)/app.so
 
+# The virtual graceloader (../virtual-tanmatsu-graceloader): this same
+# build/app.so, run on this PC by an RV32 interpreter with an SDL window for
+# the screen and the keyboard for the buttons. `nisp` is one of the apps that
+# Makefile knows, and its `nisp-install` stages the assets metadata.json lists
+# -- logo, music, licenses -- onto a host directory the emulator exports as
+# /sd, so the app sees the same install path here as it does on a card.
+#
+#   make emu-run                 build, stage, run until the window is closed
+#   make emu-run EMU_SECS=15     ... and quit by itself after 15 s
+#   make emu-build               build the emulator only
+#   make emu-test                run the test manifest, tools/emutests.txt
+#
+# Good for: menus, screens, layout, saves -- anything where the question is
+# "does this look right", answered without anybody at the badge.
+# Not good for: frame rate. The interpreter is not the P4, so its fps is not
+# evidence about the render budget; those numbers come from a device.
+#
+# What still needs a badge: frame rate, and anything about real hardware --
+# the interpreter is maybe a third of the P4's speed, so its fps is a shape
+# (which phase, how many primitives) and not a number.
+EMU_DIR ?= ../virtual-tanmatsu-graceloader
+EMU_BIN ?= $(EMU_DIR)/build/graceloader-emulator
+EMU_INT ?= $(EMU_DIR)/int
+EMU_SD ?= $(EMU_DIR)/sd
+EMU_CARD ?= $(EMU_DIR)/card
+# Seconds to run before quitting by itself; 0 runs until the window closes.
+EMU_SECS ?= 0
+EMU_GUEST_PATH = $(APP_INSTALL_PATH)/app.so
+EMU_ARGS = --int $(EMU_INT) --sd $(EMU_SD) --card $(EMU_CARD) $(EMU_GUEST_PATH)
+
+.PHONY: emu emu-build emu-install emu-run
+emu-build:
+	$(MAKE) -C $(EMU_DIR) build
+
+# Staging is the emulator's own target, driven off this repo's metadata.json --
+# one manifest, not two lists that can disagree.
+emu-install: build
+	$(MAKE) -C $(EMU_DIR) nisp-install
+
+emu-run: emu-install
+	@if [ "$(EMU_SECS)" -gt 0 ]; then \
+	  timeout "$(EMU_SECS)" "$(EMU_BIN)" $(EMU_ARGS) || test $$? -eq 124; \
+	else \
+	  "$(EMU_BIN)" $(EMU_ARGS); \
+	fi
+
+emu: emu-run
+
+# The same test kit the badge runs (main/testkit/devtest.h), driven through
+# the emulator's console: ../virtual-tanmatsu-graceloader backs USB-serial/JTAG
+# with stdin, so a command piped in is a command the app receives, its
+# @@SR-*@@ records come out on stdout, and it exits by itself when the test
+# ends. No badge, no serial port, nobody at a device.
+#
+#   make emu-test
+#
+# Always those three words, never any arguments: what gets run lives in
+# tools/emutests.txt, so a run is reproducible, reviewable in the repo, and
+# identical every time instead of re-typed. The app exits to the launcher
+# when a test ends, so each line of the manifest gets its own launch.
+# Everything the app printed is kept in results/emulator/latest.log.
+#
+# The records are the same records tools/testrun.py parses off a badge. Frame
+# rates are not comparable to a badge's (an RV32 interpreter, not a P4); what
+# carries over is the split between phases and the primitive counts.
+EMU_TEST_FILE ?= tools/emutests.txt
+EMU_TEST_LOG  ?= results/emulator/latest.log
+# Per test. The app quits by itself when a test ends, so this only fires if
+# one hangs.
+EMU_TEST_SECS ?= 180
+
+.PHONY: emu-test
+emu-test: emu-install
+	@mkdir -p $(dir $(EMU_TEST_LOG))
+	@: > $(EMU_TEST_LOG)
+	@n=0; fail=0; \
+	 while IFS= read -r line; do \
+	   case "$$line" in ''|'#'*) continue;; esac; \
+	   n=$$((n+1)); \
+	   echo "--- $$line"; \
+	   out=$$(mktemp); \
+	   printf '%s\n' "$$line" | timeout $(EMU_TEST_SECS) "$(EMU_BIN)" $(EMU_ARGS) > "$$out" 2>&1; \
+	   rc=$$?; \
+	   cat "$$out" >> "$(EMU_TEST_LOG)"; \
+	   grep -E '@@SR-[A-Z]+@@' "$$out" | sed 's/^/    /'; \
+	   rm -f "$$out"; \
+	   if [ $$rc -ne 0 ] && [ $$rc -ne 124 ]; then echo "    exit $$rc"; fail=1; fi; \
+	 done < $(EMU_TEST_FILE); \
+	 echo "--- $$n test(s) -> $(EMU_TEST_LOG)"; \
+	 test $$fail -eq 0
+
 # USB mode switching
 #
 # The device's USB peripheral is in one of two modes: BadgeLink (USB_DEVICE),
