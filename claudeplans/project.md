@@ -1593,7 +1593,7 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 6.4 | Mode indicators: SAS on/off and its reference, auto-guidance armed, delta-v remaining on the armed node | in progress | The status line reads `stage 2/3  engines cold  SAS prograde  RCS on  chute  legs`: the armed stage, what the engines are doing (D-56), the mode and its reference, and what has already been let go, all in words. Auto-guidance armed and the armed node's delta-v are 8.3's, and there is no node to arm until block 7. |
 | 6.5 | Heat readout: the hottest part as a bar against its limit, named when it passes 70 %, and a fragment count when the stack has split | done | 2026-11-01. The bar is off the screen below 2 % of the limit; past 70 % its value becomes `62% Main stage`, from `readout.heat_part` through `nisp_part_row(...)->name`, because which part is going is the part a player can still act on. The status line gains `N loose piece(s)` whenever `mission.debris_count` is non-zero (Part F5). |
 | 6.6 | Stability readout: the static margin as a signed number in metres, with the drag centre and CoM marked on the attitude indicator | done | 2026-11-01. `MARGIN` is the signed metres; the picture is a nose-to-tail strip under the left column -- a square for the mass, a mark pointing down for the drag centre, one pointing up for the thrust, each in its own colour -- drawn only while there is air. A strip rather than marks on the ship: the chase camera is behind and above it, where marks on the stack would sit under the reticle and behind the silhouette (D-37's teaching still happens, as a pair of marks crossing). |
-| | **Accept:** every number a flight needs is on screen, and every key that changes it is remappable | done | 2026-11-01, host + emulator: `nispcheck: ok (502 checks)`, `make emu-test` **12/12 ok**, the flight bench still 146 triangles with the whole HUD on top of it, and two new screen references added to the manifest -- Controls `cda2f879`, Keys `c96e5467`. The flight scene was crashing until the status line's format string was balanced (F-42); `-Werror=format` is on both builds now. Owed: the badge run, which is the only frame rate that means anything for a HUD (D-39), and a look at the stability strip, which the bench never draws because the bench is above the air. |
+| | **Accept:** every number a flight needs is on screen, and every key that changes it is remappable | in progress | 2026-11-01, host + emulator: `nispcheck: ok (502 checks)`, `make emu-test` **12/12 ok**, the flight bench still 146 triangles with the whole HUD on top of it, and two new screen references added to the manifest -- Controls `cda2f879`, Keys `c96e5467`. The flight scene was crashing until the status line's format string was balanced (F-42); `-Werror=format` is on both builds now. Owed: the badge run, which is the only frame rate that means anything for a HUD (D-39), and a look at the stability strip, which the bench never draws because the bench is above the air. **Reopened 2026-11-01** by the first badge flight: the numbers were all there and none of them explained what the ship was doing -- see G-01..G-10 and block 12. |
 | **7** | **Map mode and manual nodes** | | |
 | 7.1 | `map/map_view.{c,h}`: TAB to map, the current SOI's plane, Bob and Cheese as discs, Cheese's orbit, the ship | todo | The ship keeps flying while the map is up. |
 | 7.2 | `map/orbit_draw.{c,h}`: the conic as a polyline sampled from the elements (128 samples), plus the predicted path through the patch chain | todo | |
@@ -1626,6 +1626,35 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 11.3 | Settings rows this game needs: SAS by default, HUD units, map zoom (replacing the island's view distance) | todo | |
 | 11.4 | README and this document brought to the state the code is actually in | todo | |
 | | **Accept:** Part G's targets met, or the shortfall written down with the numbers that explain it | todo | |
+| **12** | **Flight feedback (from the badge flight of 2026-11-01)** | | **runs before blocks 10 and 11** -- the game is not flyable without it, so a regression suite and a polish pass would be built on a flight nobody can fly. See the defect list below. |
+| 12.1 | G-01: `igniting` is only true while a stage is actually burning, and the plume follows it | todo | The plume draw is already conditional (`game/scene.c:774`); the bug is whoever sets `igniting`. |
+| 12.2 | G-02: steering produces visible authority, or says on screen why it does not | todo | Control torque is RCS-only today (`flight/control.c:58-60`); the HUD must show the RCS module count, and the design stats must show it before launch. |
+| 12.3 | G-03: the pod is a closed solid, capped at both ends | todo | |
+| 12.4 | G-04: the canopy sits behind the direction of travel and gives the capsule a drag centre behind its CoM, so a chute-bearing capsule streams tail-first | todo | Part A5's drag centre has to move when the chute opens. |
+| 12.5 | G-05: a jettisoned stage becomes a real object -- simulated, drawn, and retired by distance, not by deletion (D-63) | todo | Staging must hand the stage to `m->debris`, and `game/scene.c` must draw `m->debris`. |
+| 12.6 | G-06: the camera always looks at the ship; the cursor keys orbit it (range / azimuth / elevation) (D-64) | todo | `LOOK_*` stays the abstraction; only what it means changes. |
+| 12.7 | G-07: a horizon that moves with the ship, so attitude is readable without an instrument | todo | The horizon exists but is planet-locked (`game/scene.c:265-266`); it follows from the camera change in 12.6. |
+| 12.8 | G-08: an artificial horizon on the HUD (D-65) | todo | |
+| 12.9 | G-09/G-10: engine sound while burning, plus staging and chute-deployment sounds (D-66) | todo | `main/audio/` has no SFX path today, only the three MP3 contexts. |
+| | **Accept:** a launch flown blind on the badge reads correctly -- what is burning, which stage is live, which way the ship points, and what just came off it | todo | |
+
+### Defect list -- flight (reported on the badge, 2026-11-01)
+
+Block 6's Accept is reopened by this list. Each row is what was seen, what
+the code actually does, and the step that owns the fix.
+
+| ID | Seen on the badge | What the code does today | Owner |
+|---|---|---|---|
+| **G-01** | Engine flames are showing even sitting on the pad and with the engine shut off | The plume *is* conditional (`main/game/scene.c:774`, `if (p->igniting)`), so the drawing is right and `igniting` is wrong -- the pad launch starts cold (D-56), so something lights it later than it should | 12.1 |
+| **G-02** | Q W E A S D do nothing | Defaults are W/S pitch, A/D yaw, Q/E roll (`main/game/input.c:32-48`, Flight section), so the keys are bound. But steering torque is **RCS-only**: `nisp_control_authority_knm()` returns 0 unless RCS is on (`main/flight/control.c:58-60`), and the authority is `NISP_RCS_TORQUE_KNM` times the number of RCS modules -- stages with RCS still attached, plus the pod when the capsule has pod RCS (`control.c:36-56`). `nisp_control_apply` returns early at zero authority (`control.c:65`). A rocket built without pod RCS and without stage RCS therefore has **no control torque at all**, and the keys genuinely do nothing. Nothing on screen says the ship has none | 12.2 |
+| **G-03** | The capsule is hollow, with no bottom | The pod is a tube plus a nose taper to zero radius (`main/game/scene.c:754`); the tail end of the tube is never capped, so it is an open cone | 12.3 |
+| **G-04** | Chute deployed, and the capsule still drops nose-down with the canopy pointing at the ground | The canopy is drawn **ahead of the nose** (`rim = L + 4 + rmax*2`, `main/game/scene.c:786`) -- the wrong end of the velocity vector -- and Part A5 gives the open chute no drag centre behind the CoM, so nothing turns the capsule tail-first | 12.4 |
+| **G-05** | Decoupled stages simply disappear instead of obeying physics | Staging truncates the stack (`main/flight/mission.c:206`) and never hands the dropped stage to `m->debris`; only heat failures make debris (`mission.c:271`). And `main/game/scene.c` never draws `m->debris` at all, so even heat fragments are invisible | 12.5, D-63 |
+| **G-06** | The cursor keys move the camera in a way that does not make sense | `LOOK_*` is a per-frame delta into the camera's own yaw / pitch (`main/game/input.c:39-42`): it rotates the camera about itself instead of moving it around the ship | 12.6, D-64 |
+| **G-07** | There is no horizon that indicates the vehicle's attitude | A horizon is drawn (`main/game/scene.c:265-266`: the ship centred on it, the planet filling everything below), and `RENDER_HORIZON_Y` is used by the HUD (`main/game/hud.c:199`). The problem is that the chase camera is **planet-locked**: it looks at the ship using the local vertical *at the camera* as up (`scene.c:265-270`) and positions itself from the ground-velocity trail (`scene.c:200-250`), so the horizon is always level no matter what the ship is doing. It can never read out attitude | 12.7, D-64 |
+| **G-08** | No artificial horizon | Not in the plan until now | 12.8, D-65 |
+| **G-09** | The engines make no sound while firing | `main/audio/` has no SFX path at all -- only the three MP3 contexts (menu / engineering / space). Nothing plays during a burn | 12.9, D-66 |
+| **G-10** | Staging and chute deployment make no sound | Same: no SFX path exists | 12.9, D-66 |
 
 ### Explicitly out of scope for this plan
 
@@ -2471,6 +2500,25 @@ document if it ever happens:
   `s_world_epoch` there. Otherwise the sky over the hub and the sky the ship
   is standing in are two different instants, and a craft left in orbit around
   noon comes back to a planet that has since rotated under it.
+
+- **D-63** **A jettisoned stage is an object, not a deletion.** Staging hands
+  the dropped stage to the mission's debris list, where it is simulated like
+  anything else with no control capsule and is drawn like one. It is retired
+  by distance -- a few kilometres from the mission, not immediately -- which
+  is what makes a decoupling visible and gives later multi-craft play
+  something to dock with. Heat fragments follow the same rule (G-05).
+- **D-64** **The camera looks at the ship, always.** The cursor keys move the
+  camera *around* the ship -- range, azimuth, elevation -- and never rotate
+  the view about the camera's own position. `LOOK_*` stays the abstraction
+  the call sites use; only what it produces changes (G-06).
+- **D-65** **An artificial horizon is part of the HUD**, alongside the scene's
+  horizon: the ship's attitude has to be readable both at a glance through the
+  window and as an instrument (G-07, G-08).
+- **D-66** **Sound is flight feedback, not polish.** Engines audible while
+  burning with the level following the throttle, a sound at each staging
+  event, and one at chute deployment. These are how a player finds out what
+  the ship is doing without reading a number, so they belong with block 12,
+  not with block 11 (G-09, G-10).
 
 
 ---
