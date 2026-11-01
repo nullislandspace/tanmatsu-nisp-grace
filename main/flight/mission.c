@@ -335,8 +335,10 @@ void nisp_mission_step(nisp_mission_t* m, nisp_control_t* ctl, double frame_dt) 
     nisp_warp_plan(&m->ship, c->warp, dt_frame, thrusting, steering, &m->last_warp);
     double const dt_sim = m->last_warp.dt_sim;
 
-    // 4. the ship
-    nisp_vessel_t fragment;
+    // 4. the ship. The fragment is a whole vessel (its own stack of parts),
+    // so it lives here for the life of the program rather than on the
+    // 8 kB main-task stack the frame runs on (F-45).
+    static nisp_vessel_t fragment;
     nisp_vessel_copy(&m->ship, &fragment);
     nisp_hit_t const hit = advance_body(&m->ship, ctl, m->t, dt_sim, NISP_SUBSTEP_MAX, &fragment);
     apply_hit(m, hit, &fragment);

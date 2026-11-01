@@ -247,7 +247,7 @@ int save_slot_peek(int slot, nisp_slot_t* out) {
     // open; this is a second one, a few times a session, which is what a
     // menu costs. The seed is read out alongside them only because the
     // field is there and an old slot has one (D-50).
-    nisp_game_t g;
+    static nisp_game_t g;  // 1 kB on an 8 kB stack: a peek is not the place (F-45)
     if (save_load(slot, &g)) {
         out->seed = g.seed;
         snprintf(out->name, sizeof(out->name), "%s", g.name);
@@ -291,7 +291,7 @@ bool save_write(int slot, nisp_game_t const* game) {
 
 bool save_rename(int slot, char const* name) {
     if (name == NULL || name[0] == '\0') return false;
-    nisp_game_t g;
+    static nisp_game_t g;  // (F-45)
     if (!save_load(slot, &g)) return false;
     snprintf(g.name, sizeof(g.name), "%s", name);
     return save_write(slot, &g);

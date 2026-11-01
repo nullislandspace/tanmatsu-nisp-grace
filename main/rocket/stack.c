@@ -457,39 +457,40 @@ int nisp_stack_advance(nisp_stack_t* s) {
 bool nisp_stack_split(nisp_stack_t* s, int index, nisp_stack_t* other) {
     if (s == NULL || index < 0 || index >= s->count) return false;
     if (s->part[index].kind == NISP_KIND_CAPSULE) return false;  // the pod is the mission
+    if (index == 0) return false;  // nothing above the break to keep
 
-    nisp_stack_t upper, lower;
-    memset(&upper, 0, sizeof(upper));
-    memset(&lower, 0, sizeof(lower));
-    upper.stage_count = s->stage_count;
-    lower.stage_count = s->stage_count;
-    upper.pod_rcs = s->pod_rcs;
-    upper.chutes = s->chutes;
-    lower.pod_rcs = s->pod_rcs;
-    lower.chutes = s->chutes;
-    lower.throttle = 0.0f;  // debris does not fire its engines
-    for (int i = 0; i < NISP_DESIGN_STAGE_MAX; i++) {
-        upper.legs_deployed[i] = s->legs_deployed[i];
-        lower.legs_deployed[i] = s->legs_deployed[i];
+    // Rows are kept nose-first, so the fragment that keeps control is
+    // already the first `index` rows of `s`: cutting the stack is a shorter
+    // count, not a copy. Only the tail has to move, and it moves straight
+    // into the caller's `other`. Two whole `nisp_stack_t`s on the stack here
+    // was the single biggest frame in the app (F-45).
+    bool pod = false;
+    for (int i = 0; i < index; i++) {
+        if (s->part[i].kind == NISP_KIND_CAPSULE) pod = true;
+    }
+    if (!pod) return false;  // should not happen; do not lose the mission
+
+    if (other != NULL) {
+        nisp_stack_t* lower = other;
+        memset(lower, 0, sizeof(*lower));
+        lower->stage_count = s->stage_count;
+        lower->pod_rcs = s->pod_rcs;
+        lower->chutes = s->chutes;
+        lower->throttle = 0.0f;  // debris does not fire its engines
+        for (int i = 0; i < NISP_DESIGN_STAGE_MAX; i++) {
+            lower->legs_deployed[i] = s->legs_deployed[i];
+        }
+        for (int i = index + 1; i < s->count && lower->count < NISP_STACK_PART_MAX; i++) {
+            lower->part[lower->count++] = s->part[i];
+        }
+        nisp_stack_recompute(lower);
+        lower->live_stage = -1;  // debris: nothing to light
+        for (int i = 0; i < lower->count; i++) lower->part[i].igniting = false;
     }
 
-    for (int i = 0; i < s->count; i++) {
-        if (i == index) continue;
-        nisp_stack_t* dst = (i < index) ? &upper : &lower;
-        if (dst->count < NISP_STACK_PART_MAX) dst->part[dst->count++] = s->part[i];
-    }
-
-    if (upper.count == 0) return false;
-
-    nisp_stack_recompute(&upper);
-    nisp_stack_recompute(&lower);
-    if (!upper.has_capsule) return false;  // should not happen; do not lose the mission
-
-    lower.live_stage = -1;
-    for (int i = 0; i < lower.count; i++) lower.part[i].igniting = false;
-
-    *s = upper;
-    if (other != NULL) *other = lower;
+    s->count = index;
+    s->throttle = 0.0f;  // a separation goes cold, the same rule staging uses
+    nisp_stack_recompute(s);
     return true;
 }
 

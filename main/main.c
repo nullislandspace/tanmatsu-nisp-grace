@@ -556,21 +556,28 @@ static void leave(void) {
 
 // --- What the menu decided ----------------------------------------------
 
+// What a menu decision needs is a world and a blueprint, and both are big
+// enough that they may not be locals in here (F-45): the frame loop runs on
+// graceloader's 8 KiB main-task stack, and a function pays for every local in
+// the whole function at its entry, so two `nisp_game_t`s and a mission in
+// this switch overflowed the stack before any case had run. They live here
+// instead, where the menu is the only user and one at a time is enough.
+static nisp_game_t s_cmd_game;
+static nisp_design_t s_cmd_design;
+
 static void handle_cmd(menu_cmd_t const* cmd) {
     switch (cmd->kind) {
         case MENU_CMD_PLAY: {
-            nisp_game_t game;
-            if (save_load(cmd->slot, &game)) {
-                open_world(cmd->slot, &game);
+            if (save_load(cmd->slot, &s_cmd_game)) {
+                open_world(cmd->slot, &s_cmd_game);
             } else {
                 menu_status("Could not open that world");
             }
             break;
         }
         case MENU_CMD_CREATE: {
-            nisp_game_t game;
-            if (save_new(cmd->slot, cmd->name, NISP_WORLD_SEED, &game)) {
-                open_world(cmd->slot, &game);
+            if (save_new(cmd->slot, cmd->name, NISP_WORLD_SEED, &s_cmd_game)) {
+                open_world(cmd->slot, &s_cmd_game);
                 flash("A new world");
             } else {
                 menu_status("Could not create that world");
@@ -606,25 +613,21 @@ static void handle_cmd(menu_cmd_t const* cmd) {
         case MENU_CMD_STREAM: s_stream_wanted = true; break;
 
         case MENU_CMD_BUILD: open_engineering(NULL); break;
-        case MENU_CMD_ENGINEERING: {
-            nisp_design_t design;
-            if (nisp_design_load(cmd->name, &design)) {
-                open_engineering(&design);
+        case MENU_CMD_ENGINEERING:
+            if (nisp_design_load(cmd->name, &s_cmd_design)) {
+                open_engineering(&s_cmd_design);
             } else {
                 menu_status("Could not read that blueprint");
             }
             break;
-        }
-        case MENU_CMD_LAUNCH: {
-            nisp_design_t design;
-            if (nisp_design_load(cmd->name, &design)) {
-                launch_design(&design);
+        case MENU_CMD_LAUNCH:
+            if (nisp_design_load(cmd->name, &s_cmd_design)) {
+                launch_design(&s_cmd_design);
                 flash(cmd->name);
             } else {
                 menu_status("Could not read that blueprint");
             }
             break;
-        }
         case MENU_CMD_NAME:
             // The name the text entry accepted, for the drawing Engineering
             // is holding (D-11). The panel closed itself on the way out.
@@ -667,19 +670,20 @@ static void handle_cmd(menu_cmd_t const* cmd) {
         case MENU_CMD_MISSION: {
             // Picking a craft up is the same three steps as launching one:
             // read the blueprint it was built from, put the ship back on it,
-            // and give the keyboard to the flight.
-            nisp_design_t design;
-            if (!nisp_design_load(cmd->name, &design)) {
+            // and give the keyboard to the flight. The hub only offers this
+            // when nothing is flying, which is what makes it safe to restore
+            // straight into the mission rather than through a 22 kB copy
+            // (F-45).
+            if (s_flying) break;
+            if (!nisp_design_load(cmd->name, &s_cmd_design)) {
                 menu_status("Could not read that blueprint");
                 break;
             }
-            nisp_mission_t mission;
-            if (!nisp_archive_restore(&s_game.archive, cmd->slot, &design, &mission)) {
+            s_design = s_cmd_design;
+            if (!nisp_archive_restore(&s_game.archive, cmd->slot, &s_design, &s_mission)) {
                 menu_status("Could not put that craft back");
                 break;
             }
-            s_design = design;
-            s_mission = mission;
             s_world_epoch = s_mission.t;  // the sky where the craft is (F-40)
             s_bench = false;
             s_flying = true;

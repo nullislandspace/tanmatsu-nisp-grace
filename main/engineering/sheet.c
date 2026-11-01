@@ -389,7 +389,7 @@ void nisp_sheet_draw(pax_buf_t* fb, nisp_rect_t r, nisp_stack_t const* s, nisp_s
 
 void nisp_sheet_thumb(pax_buf_t* fb, nisp_rect_t r, nisp_design_t const* d) {
     if (fb == NULL || d == NULL || r.w <= 0 || r.h <= 0) return;
-    nisp_stack_t stack;
+    static nisp_stack_t stack;  // 2.3 kB: the menu draws these on the main task (F-45)
     nisp_stack_build(d, &stack);
     nisp_sheet_view_t const view = nisp_sheet_fit(&stack, r, -1);
     draw_grid(fb, r);

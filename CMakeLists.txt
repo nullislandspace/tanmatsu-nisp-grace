@@ -125,6 +125,12 @@ target_compile_options(app_obj PRIVATE
     -ffunction-sections -fdata-sections -fno-common
     -D__thread=
     -DESP_PLATFORM
+    # Per-function stack frames, written next to the objects as .su files and
+    # read back by `make stackusage`. The app runs on graceloader's 8 KiB
+    # main-task stack, and a stack overflow there is a Guru Meditation on the
+    # badge and nothing at all in the emulator (F-45) -- so the number has to
+    # be measured where the build actually happens.
+    -fstack-usage
 )
 
 # ESP-IDF normally force-includes FreeRTOS headers for all components

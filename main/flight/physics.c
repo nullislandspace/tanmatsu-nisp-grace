@@ -847,7 +847,10 @@ nisp_hit_t nisp_vessel_resolve(nisp_vessel_t* v, double t, nisp_vessel_t* other)
         int const kind = v->stack.part[idx].kind;
         int const stage = v->stack.part[idx].stage;
 
-        nisp_stack_t lower;
+        // Static, not a local: 2.3 kB of frame here sits under the mission
+        // step on the badge's 8 kB main-task stack (F-45). Nothing in the
+        // flight model is reentrant -- it all runs on that one task.
+        static nisp_stack_t lower;
         if (!nisp_stack_split(&v->stack, idx, &lower)) {
             v->alive = false;  // the capsule was the part that went
             v->wreck_kind = kind;

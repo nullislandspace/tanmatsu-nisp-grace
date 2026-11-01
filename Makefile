@@ -86,7 +86,29 @@ HOSTCFLAGS  := -O1 -Wall -Wextra -Werror=implicit-function-declaration -Werror=f
 
 # The pure set: everything Part H compiles against, and nothing else.
 PURE_SRCS := $(wildcard main/sim/*.c) $(wildcard main/rocket/*.c) $(wildcard main/flight/*.c) \
-             main/common/rng.c main/common/quat.c
+             main/common/rng.c main/common/quat.c main/common/vfs_compat.c
+
+# Stack budget. graceloader runs the app's frame callbacks on its main task,
+# which is 8192 bytes (../tanmatsu-graceloader/sdkconfig_tanmatsu), and the
+# emulator has no stack guard at all -- a 22 kB frame is a clean run there and
+# a Guru Meditation on the badge (F-45). `make build` writes a .su beside
+# every object (CMakeLists.txt); this is the report, and it fails the build
+# over a single function that spends a quarter of the budget on its own.
+STACK_BUDGET ?= 8192
+STACK_LIMIT  ?= 2048
+
+.PHONY: stackusage
+stackusage:
+	@find $(BUILD)/CMakeFiles/app_obj.dir -name '*.su' -exec cat {} + 2>/dev/null | \
+	  awk -F'\t' '{n++; if ($$2 + 0 > max[$$1] + 0) max[$$1] = $$2} \
+	        END {if (n == 0) {print "no .su files -- run make build" > "/dev/stderr"; exit 1} \
+	             for (f in max) {i = index(f, "/main/"); print max[f] "\t" (i ? substr(f, i + 1) : f)}}' | \
+	  sort -rn | head -20 | \
+	  awk -v budget=$(STACK_BUDGET) -v limit=$(STACK_LIMIT) \
+	      '{if (NR == 1) top = $$1; printf "  %6d B  %s\n", $$1, $$2; if ($$1 > limit) bad = 1} \
+	        END {printf "  largest frame %d B against a %d B main-task stack\n", top, budget; \
+	               if (bad) {printf "  over %d B: make it static or split it (F-45)\n", limit; exit 1} \
+	               print "  stackusage: ok"}'
 
 .PHONY: check
 check: hostpurity nispcheck

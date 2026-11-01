@@ -120,7 +120,9 @@ bool nisp_archive_restore(nisp_archive_t* a, int i, nisp_design_t const* design,
     // propagated from its elements to the record's clock, nose prograde --
     // which is the attitude a left-behind craft is assumed to be holding,
     // and the one a SAS would put it in anyway.
-    nisp_vessel_t v;
+    // Static for the same reason as the flight's fragment: a vessel is a
+    // 2.5 kB frame and this runs on the main task (F-45).
+    static nisp_vessel_t v;
     if (f->landed) {
         nisp_vessel_ground(&v, design, f->body, f->t, f->lat_rad, f->lon_rad);
     } else if (f->has_orbit) {
