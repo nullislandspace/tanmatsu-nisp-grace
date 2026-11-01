@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "flight/archive.h"
 #include "se_save.h"
 
 #define NISP_SAVE_SLOTS SE_SAVE_SLOT_COUNT
@@ -36,6 +37,12 @@ typedef struct {
     uint32_t seed;
     nisp_pose_t pose;
     float flown;  // metres of thrust logged -- the only progress kept so far
+
+    // The craft that was left out there (plan 9.4). Part of the save rather
+    // than a file of its own: it is only ever interesting together with the
+    // world it belongs to, and a save that could be written without it is a
+    // save that quietly deletes someone's orbit.
+    nisp_archive_t archive;
 } nisp_game_t;
 
 // What a slot says about itself without loading it.

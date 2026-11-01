@@ -41,6 +41,7 @@ typedef enum {
     SCR_AUDIO,
     SCR_DISPLAY,
     SCR_PAUSE,
+    SCR_MISSIONS,  // the craft left out there (plan 9.4)
     SCR_COUNT
 } screen_t;
 
@@ -68,6 +69,7 @@ static screen_t parent_of(screen_t s) {
         case SCR_WORLD: return SCR_WORLDS;
         case SCR_NEW: return SCR_WORLDS;
         case SCR_LAUNCH:
+        case SCR_MISSIONS:
         case SCR_DESIGNS: return SCR_WORLD;
         case SCR_DESIGN: return SCR_DESIGNS;
         case SCR_NAME: return s_edit_return;
@@ -95,6 +97,12 @@ static char s_new_name[NISP_NAME_MAX];
 static char s_designs[MAX_DESIGNS][NISP_DESIGN_NAME_MAX + 1];
 static int s_design_n;
 static int s_design_sel;
+
+// The craft left out there. A pointer, not a copy: main.c owns the archive
+// (it lives in the save), and a menu that kept its own version of it would
+// be a menu that could show a craft that is no longer there.
+static nisp_archive_t const* s_archive;
+static char s_mission_label[NISP_ARCHIVE_MAX][64];
 
 // The blueprints, read off the card. Sorted already (nisp_design_list).
 static void refresh_designs(void) {
@@ -124,6 +132,9 @@ static char s_subtitle[64];
 static char s_key_name[NISP_ACTION_COUNT][12];
 static char s_section_count[NISP_SECTION_COUNT][12];
 static int s_section;  // which section SCR_KEYS is showing
+
+// What the pause menu is being asked about (menu.h). Set by menu_open_pause.
+static menu_flight_t s_flight;
 
 // --- News -----------------------------------------------------------------
 
@@ -196,7 +207,7 @@ static int build_world(void) {
     snprintf(s_subtitle, sizeof(s_subtitle), "%s  --  %d blueprint%s", info->info, s_design_n,
              s_design_n == 1 ? "" : "s");
     begin(s_title, s_subtitle, "enter chooses   esc back");
-    s_rows[0] = (se_menu_row_t){.label = "Continue mission", .kind = SE_MENU_VAL_NONE};
+    s_rows[0] = (se_menu_row_t){.label = "Missions...", .kind = SE_MENU_VAL_NONE};
     s_rows[1] = (se_menu_row_t){.label = "Build a rocket", .kind = SE_MENU_VAL_NONE};
     s_rows[2] = (se_menu_row_t){.label = "Launch...", .kind = SE_MENU_VAL_NONE};
     s_rows[3] = (se_menu_row_t){.label = "Designs...", .kind = SE_MENU_VAL_NONE};
@@ -451,14 +462,94 @@ static int build_display(void) {
     return 5;
 }
 
+// Which way out a paused flight has (plan 9.4). The three middle rows are
+// the whole difference between "I am still on the pad", "I am up here" and
+// "I came down", and the menu is the only thing looking at all three at once.
+typedef enum {
+    PAUSE_RESUME = 0,
+    PAUSE_SAVE,
+    PAUSE_SETTINGS,
+    PAUSE_DRAWING,  // back to the blueprint: it never left the pad
+    PAUSE_LEAVE,    // leave the craft where it is
+    PAUSE_RECOVER,  // the flight is over
+    PAUSE_TITLE,
+    PAUSE_LAUNCH
+} pause_row_t;
+
+static pause_row_t s_pause_rows[8];
+static int s_pause_n;
+
+static char const* pause_label(pause_row_t row) {
+    switch (row) {
+        case PAUSE_RESUME: return "Resume";
+        case PAUSE_SAVE: return "Save";
+        case PAUSE_SETTINGS: return "Settings";
+        case PAUSE_DRAWING: return "Back to the drawing board";
+        case PAUSE_LEAVE: return "Leave it where it is";
+        case PAUSE_RECOVER: return "Recover";
+        case PAUSE_TITLE: return "Save and quit to title";
+        case PAUSE_LAUNCH: return "Quit to launcher";
+    }
+    return "?";
+}
+
 static int build_pause(void) {
-    begin("Paused", NULL, "up/down choose   enter chooses");
-    s_rows[0] = (se_menu_row_t){.label = "Resume", .kind = SE_MENU_VAL_NONE};
-    s_rows[1] = (se_menu_row_t){.label = "Save", .kind = SE_MENU_VAL_NONE};
-    s_rows[2] = (se_menu_row_t){.label = "Settings", .kind = SE_MENU_VAL_NONE};
-    s_rows[3] = (se_menu_row_t){.label = "Save and quit to title", .kind = SE_MENU_VAL_NONE};
-    s_rows[4] = (se_menu_row_t){.label = "Quit to launcher", .kind = SE_MENU_VAL_NONE};
-    return 5;
+    int n = 0;
+    s_pause_rows[n++] = PAUSE_RESUME;
+    s_pause_rows[n++] = PAUSE_SAVE;
+    s_pause_rows[n++] = PAUSE_SETTINGS;
+    if (s_flight.wrecked) {
+        s_pause_rows[n++] = PAUSE_RECOVER;
+    } else if (s_flight.on_pad) {
+        s_pause_rows[n++] = PAUSE_DRAWING;
+    } else if (s_flight.landed) {
+        s_pause_rows[n++] = PAUSE_LEAVE;
+        s_pause_rows[n++] = PAUSE_RECOVER;
+    } else {
+        s_pause_rows[n++] = PAUSE_LEAVE;
+    }
+    s_pause_rows[n++] = PAUSE_TITLE;
+    s_pause_rows[n++] = PAUSE_LAUNCH;
+    s_pause_n = n;
+
+    snprintf(s_subtitle, sizeof(s_subtitle), "%s  --  %s", s_flight.craft[0] != '\0' ? s_flight.craft
+                                                                                      : "No craft",
+             s_flight.wrecked ? "wrecked" : (s_flight.landed ? "down" : "in flight"));
+    begin("Paused", s_subtitle, "up/down choose   enter chooses");
+    for (int i = 0; i < n; i++) {
+        s_rows[i] = (se_menu_row_t){.label = pause_label(s_pause_rows[i]), .kind = SE_MENU_VAL_NONE};
+    }
+    return n;
+}
+
+// The mission picker (plan 9.4). One row per craft left out there, saying
+// what it is and where it ended up, plus a way out. Like the Launch list, an
+// empty one says so rather than showing a panel with nothing in it.
+static int build_missions(void) {
+    int const n = nisp_archive_count(s_archive);
+    snprintf(s_title, sizeof(s_title), "Missions");
+    snprintf(s_subtitle, sizeof(s_subtitle),
+             n > 0 ? "Craft you left out there. Enter flies one again." : "Nothing is out there.");
+    begin(s_title, s_subtitle, "enter flies   esc back");
+    if (n == 0) {
+        s_rows[0] = (se_menu_row_t){.label = "Nothing in flight", .kind = SE_MENU_VAL_NONE};
+        return 1;
+    }
+    for (int i = 0; i < n; i++) {
+        nisp_flight_t const* f = nisp_archive_get(s_archive, i);
+        if (f == NULL) continue;
+        if (f->landed) {
+            snprintf(s_mission_label[i], sizeof(s_mission_label[i]), "%d. %s  --  down on %s", i + 1,
+                     f->vessel, nisp_body(f->body)->name);
+        } else {
+            float const ap = (float)(f->el.apoapsis_km - nisp_body(f->body)->radius_km);
+            snprintf(s_mission_label[i], sizeof(s_mission_label[i]), "%d. %s  --  %s, ap %dkm", i + 1,
+                     f->vessel, nisp_mission_state_name(f->state), (int)ap);
+        }
+        s_rows[i] = (se_menu_row_t){.label = s_mission_label[i], .kind = SE_MENU_VAL_NONE};
+    }
+    s_rows[n] = (se_menu_row_t){.label = "Back", .kind = SE_MENU_VAL_NONE};
+    return n + 1;
 }
 
 static int build_rows(screen_t s) {
@@ -479,6 +570,7 @@ static int build_rows(screen_t s) {
         case SCR_AUDIO: return build_audio();
         case SCR_DISPLAY: return build_display();
         case SCR_PAUSE: return build_pause();
+        case SCR_MISSIONS: return build_missions();
         default: return 0;
     }
 }
@@ -738,10 +830,10 @@ static void activate(menu_cmd_t* cmd) {
 
         case SCR_WORLD:
             if (row == 0) {
-                // "Continue mission" is a verb with an argument the hub cannot
-                // see: which mission is main.c's business, and if there is
-                // none it says so rather than pretending.
-                cmd->kind = MENU_CMD_RESUME;
+                // "Missions..." is the verb; which craft is the argument, and
+                // the hub cannot see it (D-24). The picker can.
+                s_cursor[SCR_MISSIONS] = 0;
+                go(SCR_MISSIONS);
             } else if (row == 1) {
                 cmd->kind = MENU_CMD_BUILD;
                 cmd->slot = s_slot;
@@ -808,6 +900,25 @@ static void activate(menu_cmd_t* cmd) {
                 go_back(cmd);
             }
             break;
+
+        case SCR_MISSIONS: {
+            int const n = nisp_archive_count(s_archive);
+            if (n == 0) {
+                go(SCR_WORLD);
+            } else if (row < n) {
+                nisp_flight_t const* f = nisp_archive_get(s_archive, row);
+                if (f == NULL) {
+                    go(SCR_WORLD);
+                    break;
+                }
+                cmd->kind = MENU_CMD_MISSION;
+                cmd->slot = row;
+                snprintf(cmd->name, sizeof(cmd->name), "%s", f->design);
+            } else {
+                go_back(cmd);
+            }
+            break;
+        }
 
         case SCR_NEW:
             if (row == 0) {
@@ -908,13 +1019,23 @@ static void activate(menu_cmd_t* cmd) {
             break;
 
         case SCR_PAUSE:
-            if (row == 0) cmd->kind = MENU_CMD_RESUME;
-            else if (row == 1) cmd->kind = MENU_CMD_SAVE;
-            else if (row == 2) {
-                s_settings_back = SCR_PAUSE;
-                go(SCR_SETTINGS);
-            } else if (row == 3) cmd->kind = MENU_CMD_SAVE_QUIT;
-            else if (row == 4) cmd->kind = MENU_CMD_LEAVE;
+            if (s_pause_n <= 0) {
+                go_back(cmd);
+                break;
+            }
+            switch (s_pause_rows[row < s_pause_n ? row : 0]) {
+                case PAUSE_RESUME: cmd->kind = MENU_CMD_RESUME; break;
+                case PAUSE_SAVE: cmd->kind = MENU_CMD_SAVE; break;
+                case PAUSE_SETTINGS:
+                    s_settings_back = SCR_PAUSE;
+                    go(SCR_SETTINGS);
+                    break;
+                case PAUSE_DRAWING: cmd->kind = MENU_CMD_BACK_TO_DESIGN; break;
+                case PAUSE_LEAVE: cmd->kind = MENU_CMD_LEAVE_CRAFT; break;
+                case PAUSE_RECOVER: cmd->kind = MENU_CMD_RECOVER; break;
+                case PAUSE_TITLE: cmd->kind = MENU_CMD_SAVE_QUIT; break;
+                case PAUSE_LAUNCH: cmd->kind = MENU_CMD_LEAVE; break;
+            }
             break;
 
         default: break;
@@ -1074,6 +1195,7 @@ void menu_open_spaceport(int slot) {
     refresh_slots();
     refresh_designs();
     s_cursor[SCR_WORLD] = 0;
+    s_cursor[SCR_MISSIONS] = 0;
     go(SCR_WORLD);
 }
 
@@ -1085,9 +1207,15 @@ void menu_open_working_name(char const* initial) {
     open_edit(SCR_NAME, SCR_NONE, EDIT_WORKING_NAME, initial);
 }
 
-void menu_open_pause(void) {
+void menu_open_pause(menu_flight_t const* info) {
+    s_flight = info != NULL ? *info : (menu_flight_t){0};
     s_cursor[SCR_PAUSE] = 0;
+    s_pause_n = 0;  // build_pause lays the rows out again from s_flight
     go(SCR_PAUSE);
+}
+
+void menu_set_archive(nisp_archive_t const* archive) {
+    s_archive = archive;
 }
 
 void menu_close(void) {
@@ -1164,7 +1292,12 @@ bool menu_show(char const* name) {
         s_settings_back = SCR_TITLE;
         go(SCR_DISPLAY);
     } else if (!strcmp(name, "pause")) {
-        go(SCR_PAUSE);
+        menu_open_pause(NULL);
+    } else if (!strcmp(name, "missions")) {
+        s_slot = 0;
+        refresh_designs();
+        s_cursor[SCR_MISSIONS] = 0;
+        go(SCR_MISSIONS);
     } else {
         return false;
     }

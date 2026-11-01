@@ -577,23 +577,30 @@ static void clear_vessel(nisp_vessel_t* v) {
     v->wreck_stage = -1;
 }
 
-void nisp_vessel_pad(nisp_vessel_t* v, nisp_design_t const* d, int body, double t) {
+void nisp_vessel_ground(nisp_vessel_t* v, nisp_design_t const* d, int body, double t, float lat_rad,
+                       float lon_rad) {
     if (v == NULL) return;
     clear_vessel(v);
     nisp_stack_build(d, &v->stack);
     nisp_stack_cut(&v->stack);
 
     v->body = body;
-    nisp_surface_point(body, t, NISP_PAD_LAT, NISP_PAD_LON, v->pos_km);
-    nisp_surface_velocity(body, t, NISP_PAD_LAT, NISP_PAD_LON, v->vel_kms);
-    v->lat_rad = NISP_PAD_LAT;
-    v->lon_rad = NISP_PAD_LON;
+    nisp_surface_point(body, t, lat_rad, lon_rad, v->pos_km);
+    nisp_surface_velocity(body, t, lat_rad, lon_rad, v->vel_kms);
+    v->lat_rad = lat_rad;
+    v->lon_rad = lon_rad;
 
     double up[3], north[3], east[3];
     nisp_local_frame(body, v->pos_km, up, north, east);
     float const dir[3] = {(float)up[0], (float)up[1], (float)up[2]};
     nisp_quat_from_dir(dir, &v->q);
 
+    v->landed = true;  // resting on the surface, co-rotating with it
+}
+
+void nisp_vessel_pad(nisp_vessel_t* v, nisp_design_t const* d, int body, double t) {
+    // The pad is one place on the ground, so it is this and two numbers.
+    nisp_vessel_ground(v, d, body, t, NISP_PAD_LAT, NISP_PAD_LON);
     v->landed = true;  // the mount holds it until the engines say otherwise
 }
 

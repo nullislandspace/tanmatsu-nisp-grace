@@ -43,6 +43,7 @@
 #include "rocket/stack.h"
 
 #include "common/quat.h"
+#include "flight/archive.h"
 #include "flight/control.h"
 #include "flight/mission.h"
 #include "flight/physics.h"
@@ -2515,6 +2516,213 @@ static void case16_cold_engines(void) {
     a_flight_starts_lit();
 }
 
+// =====================================================================
+// case 17 -- the craft you left out there (plan 9.4)
+// ---------------------------------------------------------------------
+// Going back to the Spaceport is not deleting a rocket. A flight you leave
+// becomes a record, and picking it up again has to put it back where it was:
+// the same orbit, the propellant it has left, the stages it still has, and
+// -- if it came down -- the ground it came down on. Checked against the
+// orbit and the masses rather than against a picture, because "my rocket is
+// gone" is the whole bug this exists to prevent.
+// =====================================================================
+
+static float all_propellant(nisp_stack_t const* s) {
+    float p = 0.0f;
+    for (int i = 0; i < s->count; i++) p += s->part[i].prop_t;
+    return p;
+}
+
+static void a_left_craft_comes_back_on_its_orbit(void) {
+    nisp_design_t const d = launcher_design();
+    nisp_vessel_t const v = circular_vessel(BODY_BOB, nisp_body(BODY_BOB)->radius_km + 300.0, &d);
+
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_begin(&m, &v, 1000.0);
+    snprintf(m.vessel_name, sizeof(m.vessel_name), "%s", "LEFT-OVER");
+    CHECK(m.airborne, "a ship already up is a mission that has flown");
+
+    // Burn for ten seconds so "restored" has to mean "as it was left" and
+    // not "as the blueprint says": a fresh copy of the design would be the
+    // lazy way to pass this test, and it would be wrong.
+    nisp_control_t ctl;
+    nisp_control_init(&ctl);
+    ctl.rcs = true;
+    ctl.sas = NISP_SAS_OFF;  // no steering, so the burn is along the nose
+    ctl.throttle = 1.0f;
+    ctl.warp = 1.0f;
+    for (int f = 0; f < 600; f++) nisp_mission_step(&m, &ctl, 1.0 / 60.0);
+
+    nisp_readout_t before;
+    nisp_mission_readout(&m, &before);
+    float const prop = all_propellant(&m.ship.stack);
+    int const parts = m.ship.stack.count;
+    CHECK(prop < 360.0f, "the flight spent something");
+
+    nisp_archive_t a;
+    nisp_archive_init(&a);
+    CHECK(nisp_archive_add(&a, &m, d.name), "a craft in orbit can be left behind");
+    CHECK(nisp_archive_count(&a) == 1, "and there is one of them");
+
+    nisp_flight_t const* f = nisp_archive_get(&a, 0);
+    CHECK(f != NULL, "the record is readable");
+    CHECK(f != NULL && f->has_orbit, "with an orbit in it");
+    CHECK(f != NULL && !f->landed, "and no ground under it");
+    CHECK(f != NULL && !strcmp(f->design, d.name), "and it knows what it was built from");
+
+    // Picked up an hour later. The elements carry their own epoch, so the
+    // craft is propagated to the clock it is restored on rather than pasted
+    // at the position it had when it was left (sim/kepler.h).
+    nisp_mission_t back;
+    nisp_mission_init(&back);
+    CHECK(nisp_archive_restore(&a, 0, &d, &back), "and it comes back");
+    CHECK(nisp_archive_count(&a) == 0, "once it is in your hands it is not out there");
+
+    CHECK(strcmp(back.vessel_name, "LEFT-OVER") == 0, "still the same ship, by name");
+    CHECK(back.airborne, "still a craft that has flown");
+    CHECK(!back.ship.landed, "still up");
+    CHECK(back.ship.stack.count == parts, "with the same stages attached");
+    CHECK_NEAR(all_propellant(&back.ship.stack), prop, 1e-3, "and the same propellant left");
+    CHECK_NEAR(back.max_ap_km, before.apoapsis_km, 1.0, "the log came with it");
+
+    nisp_readout_t after;
+    nisp_mission_readout(&back, &after);
+    CHECK_NEAR(after.alt_km, before.alt_km, 1.0, "restored where it was left");
+    CHECK_NEAR(after.speed_ms, before.speed_ms, 1.0, "at the speed it was left");
+    CHECK_NEAR(after.apoapsis_km, before.apoapsis_km, 1.0, "on the same orbit");
+}
+
+static void a_jettisoned_stage_stays_jettisoned(void) {
+    nisp_design_t const d = launcher_design();  // three stages
+    nisp_vessel_t const v = circular_vessel(BODY_BOB, nisp_body(BODY_BOB)->radius_km + 200.0, &d);
+
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_begin(&m, &v, 0.0);
+    snprintf(m.vessel_name, sizeof(m.vessel_name), "%s", "HALF-GONE");
+
+    int const full = m.ship.stack.count;
+    int const dropped = nisp_stack_drop_stage(&m.ship.stack, 2);  // the bottom stage
+    m.stages_dropped = 1;
+    CHECK(dropped > 0, "a stage went");
+    CHECK(m.ship.stack.count < full, "and the ship is shorter for it");
+
+    nisp_archive_t a;
+    nisp_archive_init(&a);
+    CHECK(nisp_archive_add(&a, &m, d.name), "the half-rocket can be left behind");
+    CHECK(!a.flight[0].attached[2], "and the record says that stage is gone");
+
+    nisp_mission_t back;
+    nisp_mission_init(&back);
+    CHECK(nisp_archive_restore(&a, 0, &d, &back), "it comes back");
+    CHECK(back.ship.stack.count == full - dropped, "as the half-rocket it was");
+    CHECK(back.stages_dropped == 1, "remembering that it dropped a stage");
+    CHECK(nisp_stack_stage_engines(&back.ship.stack, back.ship.stack.live_stage) > 0,
+          "and it still has something to burn");
+}
+
+static void a_craft_on_the_ground_comes_back_where_it_came_down(void) {
+    nisp_design_t const d = flight_design("DOWN-THERE", NISP_KIND_MAIN, 1, 4, NISP_ENGINE_SKIPPER, 1,
+                                           true, 1);
+    float const lat = 0.35f, lon = -1.20f;
+
+    nisp_vessel_t v;
+    nisp_vessel_ground(&v, &d, BODY_BOB, 5000.0, lat, lon);
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_begin(&m, &v, 5000.0);
+    snprintf(m.vessel_name, sizeof(m.vessel_name), "%s", "DOWN-THERE");
+    // A snapshot of a ship on the ground cannot say whether it flew there,
+    // and only a ship that flew can be left behind (mission.h). The mission
+    // that landed already knows; a test that builds one from the ground up
+    // has to say so.
+    m.airborne = true;
+    m.state = NISP_MISSION_LANDED;
+
+    nisp_archive_t a;
+    nisp_archive_init(&a);
+    CHECK(nisp_archive_add(&a, &m, d.name), "a craft that came down can be left there");
+    CHECK(a.flight[0].landed, "with the ground under it");
+    CHECK(!a.flight[0].has_orbit, "and no orbit to put back");
+
+    nisp_mission_t back;
+    nisp_mission_init(&back);
+    CHECK(nisp_archive_restore(&a, 0, &d, &back), "and it comes back");
+    CHECK(back.ship.landed, "down");
+    CHECK(back.state == NISP_MISSION_LANDED, "in the state it ended in");
+    CHECK_NEAR(back.ship.lat_rad, lat, 1e-6, "where it came down");
+    CHECK_NEAR(back.ship.lon_rad, lon, 1e-6, "on the spot it came down on");
+
+    double pos[3];
+    nisp_surface_point(BODY_BOB, back.t, lat, lon, pos);
+    double const p[3] = {back.ship.pos_km[0], back.ship.pos_km[1], back.ship.pos_km[2]};
+    CHECK_NEAR(dist3(p, pos), 0.0, 1e-4, "on the surface, at the clock it was restored on");
+}
+
+static void a_wreck_and_a_pad_rocket_are_not_left_behind(void) {
+    nisp_design_t const d = launcher_design();
+
+    // A rocket still on the pad is a blueprint that has not flown: it goes
+    // back to Engineering, not onto the mission list (plan 9.4).
+    nisp_mission_t pad;
+    nisp_mission_init(&pad);
+    nisp_mission_launch(&pad, &d, BODY_BOB, 0.0);
+    CHECK(!pad.airborne, "a launch is not yet a flight");
+
+    nisp_archive_t a;
+    nisp_archive_init(&a);
+    CHECK(!nisp_archive_add(&a, &pad, d.name), "so there is nothing to leave behind");
+    CHECK(nisp_archive_count(&a) == 0, "and nothing was written");
+
+    // A wreck is not a craft either.
+    nisp_vessel_t const v = circular_vessel(BODY_BOB, nisp_body(BODY_BOB)->radius_km + 200.0, &d);
+    nisp_mission_t wreck;
+    nisp_mission_init(&wreck);
+    nisp_mission_begin(&wreck, &v, 0.0);
+    wreck.state = NISP_MISSION_WRECKED;
+    wreck.ship.alive = false;
+    CHECK(!nisp_archive_add(&a, &wreck, d.name), "and a wreck is recovered, not left out there");
+    CHECK(nisp_archive_count(&a) == 0, "still nothing");
+}
+
+static void the_archive_holds_four(void) {
+    nisp_design_t const d = flight_design("SWARM", NISP_KIND_UPPER, 0, 2, NISP_ENGINE_RELION, 1, true, 0);
+    nisp_archive_t a;
+    nisp_archive_init(&a);
+    for (int i = 0; i < NISP_ARCHIVE_MAX; i++) {
+        nisp_vessel_t const v = circular_vessel(BODY_BOB, nisp_body(BODY_BOB)->radius_km + 150.0f + 10.0f * i,
+                                                &d);
+        nisp_mission_t m;
+        nisp_mission_init(&m);
+        nisp_mission_begin(&m, &v, (double)i * 60.0);
+        snprintf(m.vessel_name, sizeof(m.vessel_name), "SWARM-%d", i);
+        CHECK(nisp_archive_add(&a, &m, d.name), "another one out there");
+    }
+    CHECK(nisp_archive_count(&a) == NISP_ARCHIVE_MAX, "four is the Spaceport's limit");
+
+    nisp_vessel_t const v = circular_vessel(BODY_BOB, nisp_body(BODY_BOB)->radius_km + 190.0, &d);
+    nisp_mission_t m;
+    nisp_mission_init(&m);
+    nisp_mission_begin(&m, &v, 999.0);
+    snprintf(m.vessel_name, sizeof(m.vessel_name), "%s", "FIFTH");
+    CHECK(!nisp_archive_add(&a, &m, d.name), "and a fifth is refused, not dropped over");
+
+    CHECK(nisp_archive_remove(&a, 0), "one can be taken off the list");
+    CHECK(nisp_archive_count(&a) == NISP_ARCHIVE_MAX - 1, "and the list stays dense");
+    CHECK(nisp_archive_get(&a, 0) != NULL, "with no hole in it");
+    CHECK(nisp_archive_get(&a, NISP_ARCHIVE_MAX) == NULL, "and nothing past the end");
+}
+
+static void case17_archive(void) {
+    printf("case 17  the craft you left out there\n");
+    a_left_craft_comes_back_on_its_orbit();
+    a_jettisoned_stage_stays_jettisoned();
+    a_craft_on_the_ground_comes_back_where_it_came_down();
+    a_wreck_and_a_pad_rocket_are_not_left_behind();
+    the_archive_holds_four();
+}
+
 int main(void) {
     printf("nispcheck  --  Null Island Space Program, host harness\n\n");
 
@@ -2545,6 +2753,8 @@ int main(void) {
     case15_day_and_night();
     printf("\n");
     case16_cold_engines();
+    printf("\n");
+    case17_archive();
     printf("\n");
 
     if (s_fail) {

@@ -1183,7 +1183,8 @@ title bar   Play / Settings / Quit
   Play      the three slots
     a world   Play / Rename / Delete        -> becomes the Spaceport hub
   Settings  Controls / Graphics / Audio / Display / Livestream
-pause       Resume / Save / Settings / Save and quit / Quit
+pause       Resume / Save / Settings / the way out this flight has /
+            Save and quit to title / Quit to launcher   (D-60)
 ```
 
 The one change the game needs is what happens when a slot is opened. A
@@ -1191,7 +1192,7 @@ slot is not a world you walk around in; it is a **mission**, so opening
 one opens the Spaceport:
 
 ```
-spaceport   Continue mission...     (which mission, when the slot has more than one)
+spaceport   Missions...             (which craft was left out there)
             Build a rocket          (Engineering, on an unnamed working design)
             Launch...               (which saved design)
             Designs...              (open / rename / delete a design)
@@ -1200,8 +1201,7 @@ spaceport   Continue mission...     (which mission, when the slot has more than 
 
 The hub lists **functions, never functions-with-arguments** (D-24). A row
 that needs a parameter opens a picker for it -- "Launch..." then asks
-*which design*, "Continue mission..." then asks *which mission* when the
-slot has more than one in progress. A row whose parameter is already
+*which design*, "Missions..." then asks *which craft* (D-61). A row whose parameter is already
 unambiguous skips the picker and goes straight through. So the hub is a
 fixed-length menu no matter how many designs or missions the player has,
 which is what keeps it drawable with the same fixed-height rows as every
@@ -1577,11 +1577,12 @@ findings (F-n) and decisions (D-n). A block is not finished until its
 | 8.4 | Affordability and refusals: below the surface, inside the atmosphere, more delta-v than the stage has | todo | Refused with the number that says so (Part M4). |
 | | **Accept:** Part H 7-8 pass on the host; on the badge, "apoapsis 150 km" from a 100 km orbit produces a burn that makes it so | todo | |
 | **9** | **Mission lifecycle and persistence** | | |
-| 9.1 | Save schema v2: mission state (body, state vector, attitude, stage index, fuel, **which parts of the design are still attached**), design id, mission log | todo | Versioned before the fields are added (D-23). A saved mid-flight mission may be a fragment, so the save says which range of the design is still flying. |
-| 9.2 | Launch flow from the pad; the ship on the mount; nothing to count down | todo | |
-| 9.3 | Landing, recovery, wreck (from touchdown **or** from the capsule burning up in flight), and what the slot remembers afterwards | todo | A wreck records where it happened -- altitude and speed are the lesson (Part F5). A Cheese touchdown is the case legs exist for (Part V7). |
-| 9.4 | Design library: list, open, rename, delete, from the Spaceport | todo | |
-| | **Accept:** title -> Spaceport -> build -> name -> launch -> orbit -> deorbit -> land -> save -> continue, with no step missing | todo | |
+| 9.1 | Save schema v2: mission state (body, state vector, attitude, stage index, fuel, **which parts of the design are still attached**), design id, mission log | in progress | 2026-11-01: `flight/archive.{c,h}` is that record -- elements + epoch, body, lat/lon, per-stage attached/fill/legs, chute, SAS/throttle/ignition, and the flight log -- written into the save as nested `flight0..flight3` compounds (D-59). What is *not* done: a flight in progress is still not saved, only a flight you deliberately leave (D-60). |
+| 9.2 | Launch flow from the pad; the ship on the mount; nothing to count down | done | 2026-11-01 (block 6 follow-up). The chosen blueprint goes to the pad, engines cold, on the hub's own clock, which starts at the pad's noon (D-53, D-56). |
+| 9.3 | Landing, recovery, wreck (from touchdown **or** from the capsule burning up in flight), and what the slot remembers afterwards | in progress | 2026-11-01: the pause menu now asks what the flight was and offers the matching way out -- pad back to the blueprint, up left where it is, down left **or** recovered, wreck recovered only (D-60). Owed: the post-flight report that says *where* a wreck happened, which is the lesson Part F5 is about. |
+| 9.4 | Design library: list, open, rename, delete, from the Spaceport | done | 2026-11-01. The listing was the broken half: the card is FatFs drive `1:`, and a `f_opendir` that never tries that spelling sees an empty card (F-43). |
+| 9.5 | `Missions...`: the craft left out there, listed at the hub and flown again | done | 2026-11-01, host + emulator: `nispcheck` case 17 (orbit round trip, jettisoned stage stays jettisoned, a landed craft comes back on the ground it came down on, wrecks and pad rockets are not craft, 4 is the cap), `make emu-test` **13/13 ok** with the new `missions` screen referenced at `155edc5d`. |
+| | **Accept:** title -> Spaceport -> build -> name -> launch -> orbit -> deorbit -> land -> save -> continue, with no step missing | in progress | 2026-11-01: every step of that chain exists except the ones block 7-8 own -- there is no orbit-raising planner to make "orbit" and "deorbit" a thing you can ask for yet. On the badge this is the first time the whole loop is flyable. |
 | **10** | **Test kit and regression** | | |
 | 10.1 | Content scenes: `title`, `orbit`, `launch`, `transfer`, `map`, `engineering` -- each scripted, each a pure function of the clock | todo | A scripted flight is the only way `shots` can mean anything here (the existing bench flight is the pattern). |
 | 10.2 | `make testrefs` / `make testcompare` references committed | todo | |
@@ -2035,6 +2036,22 @@ document if it ever happens:
   and its arguments disagreeing stops the build instead of arriving as a
   Guru Meditation Error on a badge.
 
+- **F-43** 2026-11-01: **the card is FatFs drive `1:`, not `0:`.** Blueprints
+  saved, and the game came back saying there were none. Writing, deleting and
+  renaming all worked because they go through the VFS (`fopen("/sd/...")`) or
+  through `nisp_remove`/`nisp_rename`, which already try four spellings. The
+  *listing* is the one call that goes straight to FatFs (`f_opendir`), and it
+  tried `/nisp/designs`, `0:/nisp/designs` and `/sd/nisp/designs`.
+  graceloader mounts `/int` first and `/sd` second (`../tanmatsu-graceloader/main/main.c`,
+  `main/sdcard.c`), IDF's `ff_diskio_get_drive()` hands out drive numbers in
+  mount order, so the card is volume 1 and `/nisp/designs` with no prefix is a
+  path on the *internal* partition -- which does not exist, so the answer is
+  "an empty directory", which is indistinguishable from a player who has
+  never built anything. `nisp_fat_path()` in `common/vfs_compat.{c,h}` is now
+  the one place that knows the four candidates, and every FatFs call loops
+  over them. The lesson generalises: a wrong volume prefix on a *read* fails
+  quietly, while on a write it usually fails loudly.
+
 
 ### Decisions
 
@@ -2318,6 +2335,42 @@ document if it ever happens:
   every frame from the binding table, which is the same reason the legend is
   two short lines and not a table.
 
+- **D-59** **A craft you leave out there is part of the save.**
+  `flight/archive.{c,h}` keeps up to four `nisp_flight_t` records and
+  `save/save.c` writes them into the same file as the world, as nested
+  `flight0..flight3` compounds (`se_nbt.h` has no list type, so the index is
+  in the tag name). A separate file per craft would be a second place a
+  player's orbit can be lost, and a save that could be written *without* the
+  archive is a save that quietly deletes one. Four is a menu decision, not a
+  physics one (Part N1: the picker has to fit on one panel). What a record
+  keeps is a conic plus its epoch rather than a state vector, because a craft
+  left in orbit is somewhere else every time you come back for it (D-17).
+
+- **D-60** **Ending a flight is three different decisions, and the pause menu
+  asks which one this was.** `menu_open_pause` is handed a `menu_flight_t`
+  (on the pad / in flight / down / wrecked) and lays out the matching row:
+  a rocket that never left the pad goes **back to the drawing board**, because
+  there was never a mission to abandon; one that is up can be **left where it
+  is**; one that is down can be **left** or **recovered**; a wreck can only be
+  recovered. Quitting to the title leaves the flight too -- it is not a
+  cancel. Leaving is refused, rather than silently discarding the ship, when
+  the archive is full or the trajectory is a hop with no orbit to put back.
+  Docking and switching between several craft is the next thing this makes
+  possible, and is not implemented.
+
+- **D-61** **The hub's first row is `Missions...`, not `Continue mission`.**
+  "Continue" hides an argument the hub cannot see -- *which* craft -- and a
+  hub row that can only ever continue the one flight main.c happens to be
+  holding is the same mistake D-24 already rejected. The verb opens a picker
+  that lists what is out there and what it is doing (`2. Snoopy -- Bob, ap
+  214km`, `3. Snoopy -- down on Bob`).
+
+- **D-62** **The world clock follows the craft, not the other way round.** A
+  record carries the mission's own `t` (F-40), and picking a craft up moves
+  `s_world_epoch` there. Otherwise the sky over the hub and the sky the ship
+  is standing in are two different instants, and a craft left in orbit around
+  noon comes back to a planet that has since rotated under it.
+
 
 ---
 
@@ -2365,9 +2418,9 @@ document if it ever happens:
   that splits a rocket, `design.c` is the blueprint in RAM and the file format
   that has to survive being read back (F-38).
 - `main/flight/` -- `physics.c` is the tick (forces, torque caps, heat, SOI),
-  `mission.c` is the ship plus its debris and its music context, `warp.c` is the
-  ladder and its refusals, `control.c` is RCS authority and the SAS switching
-  law (F-36).
+  `mission.c` is the ship plus its debris and its music context, `archive.c` is
+  the record of a craft you leave behind (D-59), `warp.c` is the ladder and its
+  refusals, `control.c` is RCS authority and the SAS switching law (F-36).
 - `main/engineering/` -- `builder.c` is the focus ring and the parameter ladders,
   `sheet.c` is the blueprint renderer: paper, pencil strokes, dimension callouts,
   title block. One function, three sizes (Part B5).
@@ -2377,5 +2430,5 @@ document if it ever happens:
   menu, and the Spaceport hub that the game hangs off.
 - `main/game/scene.c` -- the world as drawn: three lit spheres and a starfield,
   camera-relative metres, the LOD ladder.
-- `tools/nispcheck.c` -- the host harness, 16 cases, and the only thing standing
+- `tools/nispcheck.c` -- the host harness, 17 cases, and the only thing standing
   between this project and a plausible-looking wrong solar system.

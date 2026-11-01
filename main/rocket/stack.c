@@ -409,6 +409,22 @@ bool nisp_stack_burn(nisp_stack_t* s, float dt_s) {
 
 // --- Staging and splitting ---------------------------------------------
 
+void nisp_stack_set_fill(nisp_stack_t* s, int stage, float fill) {
+    if (s == NULL || stage < 0) return;
+    if (fill < 0.0f) fill = 0.0f;
+    if (fill > 1.0f) fill = 1.0f;
+    // The same rule nisp_stack_burn uses, applied at once: a stage's tank and
+    // its booster group empty together, so one fraction means both. Restoring
+    // a craft that was left in orbit is this -- the flight already spent the
+    // propellant, and the save says how much of it is left.
+    for (int i = 0; i < s->count; i++) {
+        nisp_part_t* p = &s->part[i];
+        if (p->stage != stage) continue;
+        p->prop_t = fill * p->prop_full_t;
+    }
+    nisp_stack_recompute(s);
+}
+
 int nisp_stack_drop_stage(nisp_stack_t* s, int stage) {
     if (s == NULL || stage < 0) return 0;
     int removed = 0;

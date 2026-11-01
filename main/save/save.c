@@ -5,6 +5,7 @@
 #include "save/save.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -36,7 +37,129 @@ static void save_serialize(NbtWriter* w, void const* data) {
     nbt_write_double(w, "yaw", g->pose.yaw);
     nbt_write_double(w, "pitch", g->pose.pitch);
     nbt_write_double(w, "flown", g->flown);
+
+    // One nested compound per craft left out there, named flight0..flight3
+    // after its slot in the archive. se_nbt.h has no list type, so the
+    // index is in the tag name -- which is also what makes an archive from a
+    // newer build readable by an older one, which simply skips it.
+    for (int i = 0; i < NISP_ARCHIVE_MAX; i++) {
+        nisp_flight_t const* f = &g->archive.flight[i];
+        if (!f->used) continue;
+
+        char tag[16];
+        snprintf(tag, sizeof(tag), "flight%d", i);
+        nbt_write_compound(w, tag);
+        nbt_write_string(w, "vessel", f->vessel);
+        nbt_write_string(w, "design", f->design);
+        nbt_write_double(w, "t", f->t);
+        nbt_write_int32(w, "body", f->body);
+        nbt_write_int32(w, "state", f->state);
+        nbt_write_int32(w, "flags",
+                        (f->airborne ? 1 : 0) | (f->landed ? 2 : 0) | (f->has_orbit ? 4 : 0) |
+                        (f->chute ? 8 : 0) | (f->ignited ? 16 : 0) | (f->rcs ? 32 : 0));
+        nbt_write_double(w, "lat", f->lat_rad);
+        nbt_write_double(w, "lon", f->lon_rad);
+
+        if (f->has_orbit) {
+            nbt_write_double(w, "mu", f->el.mu);
+            nbt_write_double(w, "a", f->el.a);
+            nbt_write_double(w, "e", f->el.e);
+            nbt_write_double(w, "inc", f->el.inc);
+            nbt_write_double(w, "lan", f->el.lan);
+            nbt_write_double(w, "aop", f->el.aop);
+            nbt_write_double(w, "m0", f->el.m0);
+        }
+
+        int attached = 0, legs = 0;
+        for (int st = 0; st < NISP_DESIGN_STAGE_MAX; st++) {
+            if (f->attached[st]) attached |= 1 << st;
+            if (f->legs[st]) legs |= 1 << st;
+            char name[16];
+            snprintf(name, sizeof(name), "fill%d", st);
+            nbt_write_double(w, name, f->fill[st]);
+        }
+        nbt_write_int32(w, "attached", attached);
+        nbt_write_int32(w, "legs", legs);
+
+        nbt_write_double(w, "throttle", f->throttle);
+        nbt_write_int32(w, "sas", f->sas);
+        nbt_write_double(w, "max_ap", f->max_ap_km);
+        nbt_write_double(w, "max_speed", f->max_speed_ms);
+        nbt_write_double(w, "max_heat", f->max_heat);
+        nbt_write_int32(w, "stages", f->stages_dropped);
+        nbt_write_int32(w, "lost", f->parts_lost);
+        nbt_write_end(w);
+    }
+
     nbt_write_end(w);
+}
+
+// One flightN compound. The tag names are the ones save_serialize wrote;
+// anything unrecognised is skipped rather than trusted.
+static void read_flight(NbtReader* r, nisp_flight_t* f) {
+    char tag[32];
+    int type;
+    while ((type = nbt_read_tag(r, tag, sizeof(tag))) != NBT_END) {
+        if (type < 0) return;
+        if (type == NBT_STRING) {
+            if (!strcmp(tag, "vessel")) nbt_read_string(r, f->vessel, (int)sizeof(f->vessel));
+            else if (!strcmp(tag, "design")) nbt_read_string(r, f->design, (int)sizeof(f->design));
+            else nbt_skip_payload(r, type);
+            continue;
+        }
+        if (type == NBT_INT32) {
+            int32_t const v = nbt_read_int32(r);
+            if (!strcmp(tag, "body")) f->body = (int)v;
+            else if (!strcmp(tag, "state")) f->state = (int)v;
+            else if (!strcmp(tag, "flags")) {
+                f->airborne = (v & 1) != 0;
+                f->landed = (v & 2) != 0;
+                f->has_orbit = (v & 4) != 0;
+                f->chute = (v & 8) != 0;
+                f->ignited = (v & 16) != 0;
+                f->rcs = (v & 32) != 0;
+            } else if (!strcmp(tag, "attached")) {
+                for (int st = 0; st < NISP_DESIGN_STAGE_MAX; st++) f->attached[st] = (v & (1 << st)) != 0;
+            } else if (!strcmp(tag, "legs")) {
+                for (int st = 0; st < NISP_DESIGN_STAGE_MAX; st++) f->legs[st] = (v & (1 << st)) != 0;
+            } else if (!strcmp(tag, "sas")) f->sas = (int)v;
+            else if (!strcmp(tag, "stages")) f->stages_dropped = (int)v;
+            else if (!strcmp(tag, "lost")) f->parts_lost = (int)v;
+            continue;
+        }
+        if (type == NBT_DOUBLE) {
+            double const v = nbt_read_double(r);
+            if (!strcmp(tag, "t")) f->t = v;
+            else if (!strcmp(tag, "lat")) f->lat_rad = (float)v;
+            else if (!strcmp(tag, "lon")) f->lon_rad = (float)v;
+            else if (!strcmp(tag, "mu")) f->el.mu = (float)v;
+            else if (!strcmp(tag, "a")) f->el.a = v;
+            else if (!strcmp(tag, "e")) f->el.e = v;
+            else if (!strcmp(tag, "inc")) f->el.inc = v;
+            else if (!strcmp(tag, "lan")) f->el.lan = v;
+            else if (!strcmp(tag, "aop")) f->el.aop = v;
+            else if (!strcmp(tag, "m0")) f->el.m0 = v;
+            else if (!strcmp(tag, "throttle")) f->throttle = (float)v;
+            else if (!strcmp(tag, "max_ap")) f->max_ap_km = (float)v;
+            else if (!strcmp(tag, "max_speed")) f->max_speed_ms = (float)v;
+            else if (!strcmp(tag, "max_heat")) f->max_heat = (float)v;
+            else if (strncmp(tag, "fill", 4) == 0) {
+                int const st = atoi(tag + 4);
+                if (st >= 0 && st < NISP_DESIGN_STAGE_MAX) f->fill[st] = (float)v;
+            }
+            continue;
+        }
+        nbt_skip_payload(r, type);
+    }
+
+    // Only the conic itself is on the card (a, e, the three angles, the mean
+    // anomaly and its epoch). The rest -- p, the apses, the period -- is what
+    // nisp_elements_derive computes from those, and nisp_elements_to_state
+    // reads them (sim/kepler.h).
+    if (f->has_orbit) {
+        f->el.body = f->body;
+        nisp_elements_derive(&f->el);
+    }
 }
 
 static void save_deserialize(NbtReader* r, void* data) {
@@ -57,6 +180,17 @@ static void save_deserialize(NbtReader* r, void* data) {
                 nbt_read_string(r, g->name, (int)sizeof(g->name));
             } else if (type == NBT_INT32 && strcmp(name, "seed") == 0) {
                 g->seed = (uint32_t)nbt_read_int32(r);
+            } else if (type == NBT_COMPOUND && strncmp(name, "flight", 6) == 0) {
+                int const i = atoi(name + 6);
+                if (i >= 0 && i < NISP_ARCHIVE_MAX) {
+                    nisp_flight_t* f = &g->archive.flight[i];
+                    memset(f, 0, sizeof(*f));
+                    f->used = true;
+                    read_flight(r, f);
+                    if (g->archive.count <= i) g->archive.count = i + 1;
+                } else {
+                    nbt_skip_payload(r, type);
+                }
             } else if (type == NBT_DOUBLE) {
                 double const v = nbt_read_double(r);
                 if (!strcmp(name, "x")) g->pose.x = (float)v;
@@ -76,6 +210,11 @@ static void save_deserialize(NbtReader* r, void* data) {
 // halves of it are known. ASCII only: the engine's vector font draws
 // what it has glyphs for (se_text.h).
 static void slot_info(char* out, size_t cap, nisp_game_t const* g) {
+    int const away = nisp_archive_count(&g->archive);
+    if (away > 0) {
+        snprintf(out, cap, "%s - %dm - %d craft away", g->name, (int)g->flown, away);
+        return;
+    }
     snprintf(out, cap, "%s - %dm", g->name, (int)g->flown);
 }
 

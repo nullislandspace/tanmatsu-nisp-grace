@@ -175,6 +175,11 @@ bool nisp_stack_split(nisp_stack_t* s, int index, nisp_stack_t* other);
 // Drop a range of parts out of a stack (used by staging and by debris).
 int nisp_stack_drop_stage(nisp_stack_t* s, int stage);
 
+// Set how full one stage's tanks are, 0..1, and re-derive the sums. The
+// restore path (flight/archive) uses this: a craft left in orbit has already
+// burned what it burned, and the record says what is left.
+void nisp_stack_set_fill(nisp_stack_t* s, int stage, float fill);
+
 // The chute is part of the capsule (Part V1), so deploying it is a flag on
 // the stack rather than a part: it puts nisp_chute_cd_a(chutes) of drag at
 // the capsule's aft end, which moves the drag centre aft and makes the

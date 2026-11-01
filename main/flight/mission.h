@@ -59,6 +59,14 @@ typedef struct {
     double t_launch;  // the sim clock this flight started on: T+ is t - t_launch
     int    state;
 
+    // Has this craft ever left the ground (plan 9.4)? A rocket sitting on
+    // the pad with cold engines is a drawing that has not flown yet, and
+    // backing out of it goes back to Engineering rather than to the
+    // mission list. Once it is airborne it stays airborne even after it
+    // comes down, because "where did this come from" is a question about
+    // the flight, not about the last frame.
+    bool   airborne;
+
     // What the player called the rocket (plan 6.1). Copied from the design at
     // launch, because a fragment of a broken rocket is still the same ship,
     // and the HUD names the ship rather than the save slot.

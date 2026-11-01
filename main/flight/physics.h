@@ -108,6 +108,13 @@ typedef enum {
 // ship sitting on a turning planet has.
 void nisp_vessel_pad(nisp_vessel_t* v, nisp_design_t const* d, int body, double t);
 
+// Anywhere else on the ground, at `lat_rad` / `lon_rad`: what a craft that
+// landed and was left there is when you come back for it. Same pose rule as
+// the pad -- on the surface, nose up, carrying the ground's own velocity --
+// and the same `landed` flag. The pad is this with the pad's coordinates.
+void nisp_vessel_ground(nisp_vessel_t* v, nisp_design_t const* d, int body, double t, float lat_rad,
+                        float lon_rad);
+
 // On a conic, at `state`, with the nose along `nose_dir` (unit, frame
 // axes). nispcheck's flight cases use this instead of flying a launch.
 void nisp_vessel_orbit(nisp_vessel_t* v, nisp_design_t const* d, int body,

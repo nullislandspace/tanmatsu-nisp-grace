@@ -36,7 +36,7 @@ bool nisp_mkdir_p(char const* path) {
 
 // "/sd/nisp/x" is a VFS path; FatFs wants it volume-relative. Try the
 // plausible spellings and keep whichever the filesystem accepts.
-static void fat_candidate(char* out, size_t cap, char const* vfs, int which) {
+char const* nisp_fat_path(char* out, size_t cap, char const* vfs, int which) {
     char const* rel = vfs;
     if (strncmp(vfs, "/sd", 3) == 0) {
         rel = vfs + 3;
@@ -51,14 +51,13 @@ static void fat_candidate(char* out, size_t cap, char const* vfs, int which) {
         case 2: snprintf(out, cap, "1:%s", rel); break;
         default: snprintf(out, cap, "%s", vfs); break;
     }
+    return out;
 }
-
-#define FAT_TRIES 4
 
 bool nisp_remove(char const* path) {
     char cand[160];
-    for (int i = 0; i < FAT_TRIES; i++) {
-        fat_candidate(cand, sizeof(cand), path, i);
+    for (int i = 0; i < NISP_FAT_TRIES; i++) {
+        nisp_fat_path(cand, sizeof(cand), path, i);
         if (f_unlink(cand) == FR_OK) return true;
     }
     // ONLY FR_OK COUNTS. A candidate spelling that names the wrong volume
@@ -70,9 +69,9 @@ bool nisp_remove(char const* path) {
 
 bool nisp_rename(char const* from, char const* to) {
     char a[160], b[160];
-    for (int i = 0; i < FAT_TRIES; i++) {
-        fat_candidate(a, sizeof(a), from, i);
-        fat_candidate(b, sizeof(b), to, i);
+    for (int i = 0; i < NISP_FAT_TRIES; i++) {
+        nisp_fat_path(a, sizeof(a), from, i);
+        nisp_fat_path(b, sizeof(b), to, i);
         // f_rename's destination is relative to the source's volume, so
         // strip a drive prefix from it if the spelling added one.
         char const* dst = b;

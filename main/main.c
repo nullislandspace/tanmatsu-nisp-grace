@@ -405,9 +405,45 @@ static void open_world(int slot, nisp_game_t const* game) {
     nisp_camera_title(&s_cam, s_world_epoch);
 
     s_mode = MODE_WORLD;
+    menu_set_archive(&s_game.archive);
     menu_open_spaceport(slot);
     music_set_context(MUSIC_MENU);
     set_content("spaceport");
+}
+
+static void save_open(char const* news);  // writes the save; defined below
+
+// Leaving a flight behind (plan 9.4). A craft that is up there, or down
+// there, becomes a record in the save; a wreck is not a craft, and a rocket
+// still sitting on the pad was never a flight at all (that one goes back to
+// Engineering instead, which is where it came from).
+//
+// The world clock follows the craft. A mission carries its own clock (F-40),
+// so the hub a player lands back on has to be standing at the same instant
+// the ship is, or the sky and the ship are two different moments.
+static bool stash_mission(void) {
+    if (!s_flying) return false;
+    bool const kept = nisp_archive_add(&s_game.archive, &s_mission, s_design.name);
+    if (kept) s_world_epoch = s_mission.t;
+    return kept;
+}
+
+// Back to the Spaceport, whatever just ended. The save is written on the way
+// out because the archive lives in it: a craft left in orbit that was never
+// written down is a craft that does not exist.
+static void back_to_hub(char const* news) {
+    s_flying = false;
+    if (s_slot < 0) {
+        go_title();
+        return;
+    }
+    s_mode = MODE_WORLD;
+    nisp_camera_title(&s_cam, s_world_epoch);
+    menu_set_archive(&s_game.archive);
+    menu_open_spaceport(s_slot);
+    music_set_context(MUSIC_MENU);
+    set_content("spaceport");
+    save_open(news);
 }
 
 // A blueprint leaves the pad (plan 5.6). The design is the one that was
@@ -495,11 +531,14 @@ static void open_bench(void) {
 
 static void save_open(char const* news) {
     if (s_slot < 0) return;  // the bench has nothing to save
-    // What a save keeps is the world and the name, not the flight: a
-    // mission is resumed from the mission itself, which is plan 9.1.
+    // What a save keeps is the world, the name, and the craft left out there
+    // (plan 9.4). A flight in progress is not written down as a flight -- it
+    // is written down when you leave it, as the record that puts it back.
     if (save_write(s_slot, &s_game)) {
-        flash(news);
-        menu_status(news);
+        if (news != NULL) {
+            flash(news);
+            menu_status(news);
+        }
     } else {
         flash("Could not save");
         menu_status("Could not save");
@@ -556,6 +595,10 @@ static void handle_cmd(menu_cmd_t const* cmd) {
             break;
         case MENU_CMD_SAVE: save_open("Saved"); break;
         case MENU_CMD_SAVE_QUIT:
+            // Quitting to the title is leaving the flight, not cancelling it
+            // (plan 9.4): the craft stays where it is and the save carries
+            // the record that puts it back.
+            stash_mission();
             save_open("Saved");
             go_title();
             break;
@@ -587,6 +630,73 @@ static void handle_cmd(menu_cmd_t const* cmd) {
             // is holding (D-11). The panel closed itself on the way out.
             nisp_builder_set_name(&s_builder, cmd->name);
             break;
+
+        case MENU_CMD_BACK_TO_DESIGN:
+            // It never left the pad, so there is nothing out there to leave:
+            // the rocket goes back to the paper it was drawn on.
+            if (!s_flying) break;
+            s_flying = false;
+            open_engineering(&s_design);
+            flash("Back to the drawing board");
+            break;
+
+        case MENU_CMD_LEAVE_CRAFT: {
+            if (!s_flying) break;
+            if (stash_mission()) {
+                back_to_hub("Left where it is");
+                break;
+            }
+            // Two reasons a craft cannot be left: the archive is full, or the
+            // trajectory is a hop with no orbit to put back. Neither is a
+            // reason to throw the ship away, so the flight continues and says
+            // why rather than quietly ending.
+            menu_close();
+            s_mode = MODE_PLAY;
+            if (nisp_archive_count(&s_game.archive) >= NISP_ARCHIVE_MAX)
+                flash("No room out there -- recover it instead");
+            else
+                flash("No orbit to leave it on -- fly a steadier one");
+            break;
+        }
+
+        case MENU_CMD_RECOVER:
+            if (!s_flying) break;
+            back_to_hub("Recovered");
+            break;
+
+        case MENU_CMD_MISSION: {
+            // Picking a craft up is the same three steps as launching one:
+            // read the blueprint it was built from, put the ship back on it,
+            // and give the keyboard to the flight.
+            nisp_design_t design;
+            if (!nisp_design_load(cmd->name, &design)) {
+                menu_status("Could not read that blueprint");
+                break;
+            }
+            nisp_mission_t mission;
+            if (!nisp_archive_restore(&s_game.archive, cmd->slot, &design, &mission)) {
+                menu_status("Could not put that craft back");
+                break;
+            }
+            s_design = design;
+            s_mission = mission;
+            s_world_epoch = s_mission.t;  // the sky where the craft is (F-40)
+            s_bench = false;
+            s_flying = true;
+            s_look_yaw = s_look_pitch = 0.0f;
+
+            nisp_control_init(&s_ctl);
+            nisp_mission_readout(&s_mission, &s_readout);
+            nisp_camera_chase(&s_cam, &s_mission.ship, 0.0, ship_back_m(&s_mission.ship),
+                              ship_up_m(&s_mission.ship));
+            s_mode = MODE_PLAY;
+            menu_close();
+            music_set_context(nisp_mission_music_space(&s_mission) ? MUSIC_SPACE : MUSIC_NONE);
+            set_content("space");
+            flash(cmd->name);
+            save_open(NULL);
+            break;
+        }
 
         case MENU_CMD_NONE: break;
     }
@@ -918,7 +1028,14 @@ static void on_update(float dt, void* user) {
 
     if (act_held(pressed, NISP_PAUSE)) {
         s_mode = MODE_PAUSED;
-        menu_open_pause();
+        // The pause menu's way out is a question about the flight (plan 9.4),
+        // and the mission is the only thing that knows the answer.
+        menu_flight_t info = {0};
+        info.on_pad = !s_mission.airborne;
+        info.landed = s_mission.state == NISP_MISSION_LANDED;
+        info.wrecked = s_mission.state == NISP_MISSION_WRECKED;
+        snprintf(info.craft, sizeof(info.craft), "%s", s_mission.vessel_name);
+        menu_open_pause(&info);
     } else if (act_held(pressed, NISP_SAVE)) {
         save_open("Saved");
     } else if (act_held(pressed, NISP_INFO)) {

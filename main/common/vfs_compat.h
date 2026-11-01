@@ -31,3 +31,18 @@ bool nisp_rename(char const* from, char const* to);
 // Create a directory and every missing parent. True if it exists
 // afterwards.
 bool nisp_mkdir_p(char const* path);
+
+// --- The FatFs spelling of a VFS path ------------------------------------
+
+// A directory listing goes through FatFs (f_opendir), and FatFs wants a
+// volume-relative path with a drive prefix. graceloader mounts /int first and
+// /sd second, IDF hands out drive numbers in mount order, and so the card is
+// normally "1:" -- which is not the spelling anybody would guess (F-43).
+// Every caller that asks FatFs for something tries all of them and keeps the
+// one that answers, so this is the one place that knows the candidates.
+#define NISP_FAT_TRIES 4
+
+// `which` is 0..NISP_FAT_TRIES-1. Writes the candidate into `out` and returns
+// it, so a caller can loop over the candidates without repeating the rules.
+char const* nisp_fat_path(char* out, size_t cap, char const* vfs, int which);
+

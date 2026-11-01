@@ -78,6 +78,7 @@ set(APP_SOURCES
     main/flight/control.c
     main/flight/warp.c
     main/flight/mission.c
+    main/flight/archive.c
     # Engineering (Part B): the blueprint sheet, its icons, its notes and the
     # editor that ties them together. 2-D direct-565 drawing and Hershey text
     # only -- no scene, no camera, no PPA (F-13) -- and therefore not part of

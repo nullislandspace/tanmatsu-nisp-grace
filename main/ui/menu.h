@@ -67,6 +67,15 @@ typedef enum {
     MENU_CMD_ENGINEERING, // Engineering, on the saved design in `name`
     MENU_CMD_LAUNCH,      // fly the saved design in `name`
     MENU_CMD_NAME,        // the design name the text entry accepted
+
+    // Ending a flight, three different ways (plan 9.4). Which one the pause
+    // menu offers is a question about the flight, and the pause menu is the
+    // thing looking at it -- so it asks for one of these three rather than
+    // letting main.c guess.
+    MENU_CMD_BACK_TO_DESIGN, // it never left the pad: back to its blueprint
+    MENU_CMD_LEAVE_CRAFT,    // leave it where it is and go back to the hub
+    MENU_CMD_RECOVER,        // the flight is over: recover it, back to the hub
+    MENU_CMD_MISSION,        // fly the archived craft at index `slot`
 } menu_cmd_kind_t;
 
 typedef struct {
@@ -77,10 +86,27 @@ typedef struct {
     char            name[32];
 } menu_cmd_t;
 
+// What the flight looks like, so the pause menu can offer the way out that
+// matches it (plan 9.4): a rocket that never left the pad goes back to its
+// blueprint, one that is up can be left where it is, one that is down can be
+// left or recovered, and a wreck can only be recovered. NULL is "no flight",
+// which is what a test shot of the pause screen asks for.
+typedef struct {
+    bool on_pad;
+    bool landed;
+    bool wrecked;
+    char craft[32];
+} menu_flight_t;
+
 // The title's bar (the root menu) or the pause menu. Either replaces
 // whatever was showing.
 void menu_open_title(void);
-void menu_open_pause(void);
+void menu_open_pause(menu_flight_t const* info);
+
+// The craft left out there, for the hub's "Missions..." picker. main.c owns
+// the archive (it is part of the save); the menu only reads it, and only
+// when a screen that lists it is opened.
+void menu_set_archive(nisp_archive_t const* archive);
 
 // No menu: the ship has the keyboard.
 void menu_close(void);

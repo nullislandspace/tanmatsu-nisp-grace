@@ -136,6 +136,7 @@ void nisp_mission_launch(nisp_mission_t* m, nisp_design_t const* d, int body, do
     m->t_launch = t;
     m->state = NISP_MISSION_FLYING;
     m->music_space = false;
+    m->airborne = false;  // on the pad: not a flight yet (plan 9.4)
     m->ignited  = false;  // the pad is not a flight yet (D-56)
     m->throttle = 0.0f;
 
@@ -155,6 +156,9 @@ void nisp_mission_begin(nisp_mission_t* m, nisp_vessel_t const* v, double t) {
     m->t        = t;
     m->t_launch = t;
     m->state = NISP_MISSION_FLYING;
+    // A ship that is already down is a mission that has been flown; a ship
+    // that is already up is one too. Only a launch starts out not airborne.
+    m->airborne = !v->landed;
     // A ship that is already flying is a mission whose engines were lit
     // whenever it got there: the stage key separates here, as it always did.
     m->ignited  = true;
@@ -337,6 +341,11 @@ void nisp_mission_step(nisp_mission_t* m, nisp_control_t* ctl, double frame_dt) 
     nisp_hit_t const hit = advance_body(&m->ship, ctl, m->t, dt_sim, NISP_SUBSTEP_MAX, &fragment);
     apply_hit(m, hit, &fragment);
     m->t += dt_sim;
+
+    // Off the ground is off the ground, permanently (plan 9.4): the pause
+    // menu's way out depends on whether this is a flight or a rocket that
+    // has not left the pad yet.
+    if (!m->ship.landed) m->airborne = true;
 
     // 5. the debris: never controlled, always simulated, retired when it is
     // done (Part F5). Compacted in place so the list is always dense.

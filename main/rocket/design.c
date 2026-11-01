@@ -11,7 +11,8 @@
 #include "common/paths.h"
 
 #ifndef SM_HOST
-#include "common/vfs_compat.h"  // remove / rename are not exported by graceloader (F-06)
+#include "common/vfs_compat.h"  // remove / rename are not exported by graceloader (F-06),
+                            // and a FatFs path is not a VFS path (F-43)
 #include "ff.h"                 // f_opendir / f_readdir: the card's directory listing
 #else
 #include <dirent.h>
@@ -422,15 +423,18 @@ bool nisp_design_delete(char const* name) {
     return nisp_remove(path);
 }
 
-// The card's directory, spelled the way FatFs wants it (see vfs_compat.c:
-// a VFS path and a FatFs path are not the same string). Fills `names` with
-// up to `max` names and returns how many it found, capped at `max`.
+// The card's directory, spelled the way FatFs wants it (see common/vfs_compat:
+// a VFS path and a FatFs path are not the same string, and the card is not
+// drive 0 -- graceloader mounts /int first, so /sd is "1:" and a listing that
+// never tries that spelling finds an empty card (F-43)). Fills `names` with up
+// to `max` names and returns how many it found, capped at `max`.
 #ifndef SM_HOST
 static int list_designs(char names[][NISP_DESIGN_NAME_MAX + 1], int max) {
-    char const* const spellings[] = {"/nisp/designs", "0:/nisp/designs", DESIGN_DIR};
-    for (int s = 0; s < 3; s++) {
+    for (int s = 0; s < NISP_FAT_TRIES; s++) {
+        char spelling[192];
+        nisp_fat_path(spelling, sizeof(spelling), DESIGN_DIR, s);
         FF_DIR dir;  // not DIR: graceloader exports FatFs, not the dirent wrappers (F-06)
-        if (f_opendir(&dir, spellings[s]) != FR_OK) continue;
+        if (f_opendir(&dir, spelling) != FR_OK) continue;
         int n = 0;
         FILINFO info;
         for (;;) {
