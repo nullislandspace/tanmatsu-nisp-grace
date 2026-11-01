@@ -84,12 +84,36 @@ carried over from SynthMiner:
   workarounds in app code.
 - Builds run in the **foreground**, never backgrounded with sleep-polling.
 - **Commit and push only when the user asks.**
-- `make mode_badgelink` before any badgelink command: after the app exits
-  the badge is back in the launcher in debug mode (`303a:1001`), and a
-  BadgeLink command then fails for a reason that looks like a bug.
+- `make mode_badgelink` before **every** badgelink command, and see the loop
+  below -- this is the single most repeated mistake in this project.
 - `make push` for code, `make install` only when assets actually changed
   (~4 minutes for the 20 MB of music).
 - Tight timeouts; no routine BadgeLink downloads.
+
+### The on-device loop (memorised; do not re-derive it)
+
+    make mode_badgelink        # once per round, BEFORE anything else
+    make build push run        # build, upload app.so only, start it
+    python3 tools/testrun.py ...   # or: make cycle TEST="..." (see Part H)
+    make mode_badgelink        # again, before the NEXT round
+
+- **Why the first line is always there.** When the app exits the badge returns
+  to the launcher, and the launcher comes back **in debug mode** (`303a:1001`),
+  not BadgeLink mode (`16d0:0f9a`). Every BadgeLink command after that fails
+  for a reason that looks exactly like a bug in the app. `make mode_badgelink`
+  is what switches it back.
+- **`make mode_badgelink` often has to be run more than once.** It may not
+  succeed on the first try; a second attempt that dies with `could not open
+  port /dev/ttyACM0` usually means the first one already worked. Re-run it
+  until `lsusb` shows `16d0:0f9a`.
+- **`make build push run`, not `make install`,** for a code-only change.
+  `install` re-sends the logo, the music and the licenses (~4 min). Use it
+  only when those files actually changed.
+- **`make badgelink` once, ever** -- it clones the BadgeLink tools the other
+  targets call. Without it there is no `badgelink/tools/badgelink.sh`.
+- **A test ends by exiting the app to the launcher**, which is what puts the
+  badge back in debug mode. So the loop closes with `mode_badgelink`, not with
+  a retry of the command that failed.
 
 ---
 
@@ -1467,6 +1491,12 @@ The middle row is new (F-17, D-39) and it is the one most of blocks 4, 6,
 7 and 9 will actually be iterated in: the same `app.so`, the same install
 path, the same `@@SR-*@@` records, no badge in reach.
 
+The badge row is the loop in *About this document*: `make mode_badgelink`,
+then `make build push run`, then `tools/testrun.py` / `make cycle`, then
+`make mode_badgelink` again before the next round. It is not a suggestion --
+the app exits to a launcher that is in debug mode, so a round that skips it
+fails for a reason that looks like a bug (F-04).
+
 The reference set, from the manifest run of 2026-11-01 (the previous set was
 superseded by the fixed internal seed, which regenerates the starfield every
 screen draws its panel over, and by the sheet's new bottom edge): `engineering`
@@ -2090,6 +2120,39 @@ document if it ever happens:
   `nisp_stack_t` and the 1 kB text buffers are never locals. The guard is
   `make stackusage` (`-fstack-usage` on `app_obj`, budget 2,048 B per frame);
   the largest frame now is 960 B.
+
+- **F-46** 2026-11-01: **the badge's keyboard is a priority-0 task, so a
+  frame that never blocks swallows keystrokes.** Engineering reacted to a
+  key only after it was held for over a second; every other screen was
+  fine, and the emulator never saw it. The coprocessor driver reads the
+  keys in a task created at FreeRTOS priority 0 -- the idle priority --
+  (`tanmatsu_coprocessor.c`), and that task is the only writer of the
+  state `bsp_input_read_scancode()` reads. The app runs on graceloader's
+  main task at priority 1, so a frame that never blocks never lets the
+  keyboard task run: the key state stays stale until the frame finally
+  waits somewhere. Title is fine because it waits 5.7 ms on the PPA; the
+  blueprint sheet waits on nothing at all (`fill 10.4 submit 0.0 wait 0.0
+  rast 0.0 draw 11.5 rest 0.3` -- 22.7 ms, 44 fps, not one blocking call in
+  it). Rule: every scene blocks or yields once per frame. The blueprint now
+  takes its paper through the PPA (`JOB_FILL`, drained with
+  `se_ppa_wait_job()` + `se_ppa_buf_invalidate()` before the CPU draws on
+  it) and yields one tick in `on_update()` (`vTaskDelay(1)` -- one tick at
+  whatever `CONFIG_FREERTOS_HZ` the firmware was built with, which is the
+  smallest yield there is). Not fixed by raising the keyboard task's
+  priority: that lives in a managed component and would not survive an
+  update.
+- **F-47** 2026-11-01: **the blueprint frame free-runs, and `vsync 0.01` is
+  the proof.** `se_present()` waits on the refresh semaphore only when the
+  app has outrun the display, and on the badge it never has: engineering
+  measured 44 fps before the fix and 49.9 fps after it (749 frames over 15
+  s, `perf scene=engineering secs=15`), against a panel that shows ~30. The
+  loop is unpaced, a third of the frames drawn are never seen, and -- the
+  part that matters -- nothing in the frame blocks. Frame split after the
+  fix: `fill 0.00 wait 2.44 draw 11.14 rest 5.92` = 20.0 ms, so the PPA took
+  7.9 ms off the CPU and the yield put ~5.6 ms of idle back. Two things it
+  exposes, both still open: the sheet is a **still** drawing (identical
+  framebuffer hash at t=0 and t=1.5 s) yet costs 11.1 ms of CPU every frame,
+  and nothing paces the loop to the panel rate.
 
 ### Decisions
 
