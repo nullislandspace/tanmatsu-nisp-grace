@@ -145,6 +145,20 @@ void mipi_dsi_hal_host_gen_read_short_packet(mipi_dsi_hal_context_t *hal, uint8_
                                              mipi_dsi_data_type_t dt, uint16_t header_data, void *ret_buffer, uint16_t buffer_size);
 
 /**
+ * @brief Check whether the most recent generic/DCS read via the DSI host timed out
+ *
+ * The DSI host has no interrupt or status flag for "peer did not respond to the
+ * bus-turnaround request", so upstream ESP-IDF busy-waits forever in that case
+ * (e.g. when no display is physically connected). This driver instead bounds
+ * that wait and records whether it had to give up, so callers can detect a
+ * missing/non-responsive panel instead of hanging.
+ *
+ * @return true if the last call to mipi_dsi_hal_host_gen_read_short_packet() or
+ *         mipi_dsi_hal_host_gen_read_dcs_command() gave up waiting for a response
+ */
+bool mipi_dsi_hal_host_gen_read_timed_out(void);
+
+/**
  * @brief Set horizontal timing parameters for DPI
  *
  * @param hal Pointer to the HAL driver context
