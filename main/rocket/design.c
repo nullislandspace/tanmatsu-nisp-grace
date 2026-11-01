@@ -4,26 +4,13 @@
 
 #include "rocket/design.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "common/paths.h"
-
-#ifndef SM_HOST
-#include "common/vfs_compat.h"  // remove / rename are not exported by graceloader (F-06),
-                            // and a FatFs path is not a VFS path (F-43)
-#include "ff.h"                 // f_opendir / f_readdir: the card's directory listing
-#else
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-// The host side of the same three file operations, so this file links into
-// nispcheck without dragging common/vfs_compat (and FatFs) into it.
-static bool nisp_mkdir_p(char const* path) { mkdir(path, 0777); struct stat st; return stat(path, &st) == 0; }
-static bool nisp_remove(char const* path) { return remove(path) == 0; }
-#endif
+#include "common/vfs_compat.h"  // nisp_mkdir_p / nisp_remove: plain POSIX on both sides
 
 #define DESIGN_DIR NISP_DATA_DIR "/designs"
 #define DESIGN_EXT ".nbp"
@@ -188,7 +175,9 @@ bool nisp_design_remove(nisp_design_t* d, int at) {
 int nisp_design_encode(nisp_design_t const* d, char* buf, int cap) {
     if (d == NULL || buf == NULL || cap <= 0) return -1;
 
-    char tmp[1024];
+// A 1 kB scratch is a fifth of the badge main-task stack (F-45): the
+    // blueprint text lives here for the life of the program, not per call.
+    static char tmp[1024];
     int n = snprintf(tmp, sizeof(tmp), "%s\nname=%s\nstages=%d\n", DESIGN_HEADER, d->name, d->stage_count);
     // Written clamped (D-51), because decode clamps: a design that never went
     // through nisp_design_clamp would otherwise write a number the file
@@ -345,7 +334,9 @@ bool nisp_design_save(nisp_design_t const* d) {
 
     nisp_mkdir_p(DESIGN_DIR);
 
-    char text[1024];
+// A 1 kB scratch is a fifth of the badge main-task stack (F-45): the
+    // blueprint text lives here for the life of the program, not per call.
+    static char text[1024];
     int const n = nisp_design_encode(d, text, sizeof(text));
     if (n < 0) return false;
 
@@ -375,7 +366,8 @@ static bool read_text(char const* path, char* buf, size_t cap) {
 
 bool nisp_design_load(char const* name, nisp_design_t* out) {
     if (!nisp_design_name_ok(name)) return false;
-    char path[192], text[1024];
+    char path[192];
+    static char text[1024];  // (F-45)
     design_path(path, sizeof(path), name);
     if (!read_text(path, text, sizeof(text))) return false;
     if (!nisp_design_decode(text, out)) return false;
@@ -401,7 +393,8 @@ bool nisp_design_rename(char const* from, char const* to) {
     if (nisp_design_exists(to)) return false;
 
     nisp_mkdir_p(DESIGN_DIR);
-    char a[192], b[192], text[1024];
+    char a[192], b[192];
+    static char text[1024];  // (F-45)
     design_path(a, sizeof(a), from);
     design_path(b, sizeof(b), to);
 
@@ -423,40 +416,9 @@ bool nisp_design_delete(char const* name) {
     return nisp_remove(path);
 }
 
-// The card's directory, spelled the way FatFs wants it (see common/vfs_compat:
-// a VFS path and a FatFs path are not the same string, and the card is not
-// drive 0 -- graceloader mounts /int first, so /sd is "1:" and a listing that
-// never tries that spelling finds an empty card (F-43)). Fills `names` with up
-// to `max` names and returns how many it found, capped at `max`.
-#ifndef SM_HOST
-static int list_designs(char names[][NISP_DESIGN_NAME_MAX + 1], int max) {
-    for (int s = 0; s < NISP_FAT_TRIES; s++) {
-        char spelling[192];
-        nisp_fat_path(spelling, sizeof(spelling), DESIGN_DIR, s);
-        FF_DIR dir;  // not DIR: graceloader exports FatFs, not the dirent wrappers (F-06)
-        if (f_opendir(&dir, spelling) != FR_OK) continue;
-        int n = 0;
-        FILINFO info;
-        for (;;) {
-            if (f_readdir(&dir, &info) != FR_OK || info.fname[0] == '\0') break;
-            if (info.fattrib & AM_DIR) continue;
-            char const* dot = strrchr(info.fname, '.');
-            if (dot == NULL || strcmp(dot, DESIGN_EXT) != 0) continue;
-            size_t const len = (size_t)(dot - info.fname);
-            if (len == 0 || len > NISP_DESIGN_NAME_MAX) continue;
-            if (n < max) {
-                memcpy(names[n], info.fname, len);
-                names[n][len] = '\0';
-            }
-            n++;
-        }
-        f_closedir(&dir);
-        if (n > max) n = max;
-        return n;
-    }
-    return 0;
-}
-#else
+// The card's directory, through the dirent wrappers graceloader exports.
+// Fills `names` with up to `max` names and returns how many it found, capped
+// at `max`.
 static int list_designs(char names[][NISP_DESIGN_NAME_MAX + 1], int max) {
     DIR* dir = opendir(DESIGN_DIR);
     if (dir == NULL) return 0;
@@ -477,7 +439,6 @@ static int list_designs(char names[][NISP_DESIGN_NAME_MAX + 1], int max) {
     if (n > max) n = max;
     return n;
 }
-#endif
 
 #define DESIGN_SCAN 16
 

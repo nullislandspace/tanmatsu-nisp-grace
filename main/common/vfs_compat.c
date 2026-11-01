@@ -10,8 +10,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "ff.h"
-
 bool nisp_mkdir_p(char const* path) {
     if (path == NULL || *path == '\0') return false;
 
@@ -34,49 +32,16 @@ bool nisp_mkdir_p(char const* path) {
     return stat(buf, &st) == 0;
 }
 
-// "/sd/nisp/x" is a VFS path; FatFs wants it volume-relative. Try the
-// plausible spellings and keep whichever the filesystem accepts.
-char const* nisp_fat_path(char* out, size_t cap, char const* vfs, int which) {
-    char const* rel = vfs;
-    if (strncmp(vfs, "/sd", 3) == 0) {
-        rel = vfs + 3;
-    } else if (strncmp(vfs, "/int", 4) == 0) {
-        rel = vfs + 4;
-    }
-    if (*rel == '\0') rel = "/";
-
-    switch (which) {
-        case 0: snprintf(out, cap, "%s", rel); break;
-        case 1: snprintf(out, cap, "0:%s", rel); break;
-        case 2: snprintf(out, cap, "1:%s", rel); break;
-        default: snprintf(out, cap, "%s", vfs); break;
-    }
-    return out;
-}
-
 bool nisp_remove(char const* path) {
-    char cand[160];
-    for (int i = 0; i < NISP_FAT_TRIES; i++) {
-        nisp_fat_path(cand, sizeof(cand), path, i);
-        if (f_unlink(cand) == FR_OK) return true;
-    }
-    // ONLY FR_OK COUNTS. A candidate spelling that names the wrong volume
-    // answers FR_NO_FILE too, and taking that for success would report a
-    // deleted save that is still on the card.
+    if (path == NULL || *path == '\0') return false;
+    if (remove(path) == 0) return true;
+    // Already gone is success, not failure -- callers ask "is this file out
+    // of the way?", and it is.
     struct stat st;
     return stat(path, &st) != 0;
 }
 
 bool nisp_rename(char const* from, char const* to) {
-    char a[160], b[160];
-    for (int i = 0; i < NISP_FAT_TRIES; i++) {
-        nisp_fat_path(a, sizeof(a), from, i);
-        nisp_fat_path(b, sizeof(b), to, i);
-        // f_rename's destination is relative to the source's volume, so
-        // strip a drive prefix from it if the spelling added one.
-        char const* dst = b;
-        if (b[0] != '\0' && b[1] == ':') dst = b + 2;
-        if (f_rename(a, dst) == FR_OK) return true;
-    }
-    return false;
+    if (from == NULL || to == NULL) return false;
+    return rename(from, to) == 0;
 }
