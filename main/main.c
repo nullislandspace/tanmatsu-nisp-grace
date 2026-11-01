@@ -45,6 +45,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "pax_gfx.h"
 #include "se_audio.h"
@@ -166,6 +168,9 @@ static double s_msg_until;  // ... and how long it is worth showing
 // Half-resolution rendering (Graphics > Half resolution). The layer is the
 // scene's target; the PPA scales it up onto the engine's framebuffer.
 #define JOB_UPSCALE 1u
+// The blueprint's paper is one flat colour, so it is the PPA's job
+// rather than the CPU's (F-46).
+#define JOB_FILL 2u
 static se_ppa_layer_t s_half = {0};
 static bool s_half_ok = true;
 
@@ -928,6 +933,18 @@ static void on_update(float dt, void* user) {
     (void)user;
     (void)dt;  // the mission runs on the show clock, not on the engine's dt
 
+    // THE BADGE HAS TO BE TOLD THE KEYS (F-46). The keyboard arrives on a
+    // coprocessor task at FreeRTOS priority 0 -- the idle priority -- and it
+    // is the only writer of the state bsp_input_read_scancode() reads. This
+    // app runs on the graceloader main task at priority 1, so a frame that
+    // never blocks never lets that task run, and the keys only show up once
+    // the frame finally does wait. Every other scene waits on the PPA or on
+    // the page flip; the blueprint sheet waits on nothing, which is why it is
+    // the one screen that swallows keystrokes. One tick (10 ms at
+    // CONFIG_FREERTOS_HZ=100) is the whole fix, and the PPA paper fill makes
+    // it nearly free: the CPU's share of the frame drops by more than that.
+    if (s_mode == MODE_ENGINEERING) vTaskDelay(1);
+
     showtime_frame();
     devtest_update();
 
@@ -1073,7 +1090,8 @@ static void on_render(pax_buf_t* fb, void* user) {
     }
 
     // Engineering is a flat drawing on blue paper: no scene, no half-size
-    // layer, no upscale, no PPA job (engineering/builder.c).
+    // layer, no upscale -- but the paper itself is a PPA fill, which is what
+    // makes that frame block (F-46).
     bool const sheet      = (s_mode == MODE_ENGINEERING);
     bool const half       = !sheet && s_half_ok && settings_half_res();
     pax_buf_t* const target = half ? &s_half.buf : fb;
@@ -1085,15 +1103,20 @@ static void on_render(pax_buf_t* fb, void* user) {
     // the upscale.
     uint32_t const sky = sheet ? NISP_BLUEPRINT_ARGB : nisp_sky_argb(&s_cam, t);
 
+    // The paper goes through the PPA even at full resolution. It is the
+    // only thing the blueprint frame waits on, and a frame that never waits
+    // starves the keyboard (F-46).
+    bool const paper_hw = sheet && se_ppa_fill(fb, JOB_FILL, 0, DISPLAY_LOG_H, sky);
+
     prof_begin(PROF_FILL);
     if (half) {
         se_ppa_fill(target, 0, 0, DISPLAY_LOG_H / 2, sky);
         se_ppa_wait_job(0);
-    } else {
+    } else if (!paper_hw) {
         // Straight into the framebuffer, so a CPU clear: the CPU draws
         // into this buffer next, and a DMA fill under its cache is a
         // coherence problem this path is not worth having.
-        pax_background(fb, sheet ? NISP_BLUEPRINT_ARGB : sky);
+        pax_background(fb, sky);
     }
     prof_end(PROF_FILL);
 
@@ -1103,6 +1126,16 @@ static void on_render(pax_buf_t* fb, void* user) {
         (s_mode == MODE_TITLE || s_mode == MODE_WORLD) ? NISP_VIEW_COUNT - 1 : settings_view();
     int64_t const rast_us =
         sheet ? 0 : nisp_scene_render(target, &s_cam, s_flying ? &s_mission.ship : NULL, view, t);
+
+    // The paper is in the framebuffer by DMA now; the blueprint is drawn on
+    // top of it by the CPU, so the job has to be drained and the buffer left
+    // the cache before that happens.
+    if (paper_hw) {
+        prof_begin(PROF_WAIT);
+        se_ppa_wait_job(JOB_FILL);
+        se_ppa_buf_invalidate(fb);
+        prof_end(PROF_WAIT);
+    }
 
     if (half) {
         prof_begin(PROF_WAIT);
