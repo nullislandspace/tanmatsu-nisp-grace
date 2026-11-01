@@ -158,7 +158,7 @@ main/
   common/
 *   paths.h               /sd/nisp, /sd/nisp/saves, settings.txt
 *   rng.{c,h}             xorshift64*, hash2/hash3                  (pure)
-*   vfs_compat.{c,h}      the FatFs calls graceloader does not export
+*   vfs_compat.{c,h}      mkdir -p / remove / rename, plain POSIX (F-44)
   audio/
 *   music.{c,h}           the mixer, the per-context mp3 playlists
                           (menu / engineering / space), the procedural fallback
@@ -2052,6 +2052,44 @@ document if it ever happens:
   over them. The lesson generalises: a wrong volume prefix on a *read* fails
   quietly, while on a write it usually fails loudly.
 
+- **F-44** 2026-11-01: **the template exports the POSIX file API now, and every
+  FatFs workaround in this app is gone.** graceloader 2.8.5 rev 19 exports
+  `opendir` / `readdir` / `readdir_r` / `closedir`, `rename` / `unlink` /
+  `remove` / `access`, `mkdir` / `rmdir`, `stat` / `fstat`, and the template's
+  `fakelib/liball.so` carries them (template commit `1c8ab39`). This repo has
+  an `upstream` remote -- `git@github.com:nullislandspace/tanmatsu-template-grace.git`
+  -- and merged it, which is what makes F-43's drive-number guessing moot:
+  `opendir` goes through IDF's VFS mount table, so `/sd/nisp/designs` is
+  simply the right path and there is no volume prefix to get wrong.
+  What was deleted: `nisp_fat_path()` and `NISP_FAT_TRIES`, `ff.h` from
+  `common/vfs_compat.c` and `rocket/design.c`, the `SM_HOST` split in
+  `design.c` (vfs_compat is host-pure now and sits in `PURE_SRCS`), and
+  `dir_open()` in the engine's `se_mp3.c`. The app speaks one path dialect
+  everywhere. Two follow-ons: the SynthEngine3D submodule carries that
+  `se_mp3.c` change and needs its own commit upstream, and SynthMiner keeps
+  the old `se_mp3.c` behaviour until *its* `fakelib` is synced the same way.
+  The same merge also brought `include/bsp/storage.h` (mount status for
+  internal/SD) and dropped `GRACELOADER_VOLUME_LIMIT_PERCENT`, which this app
+  never used.
+
+
+- **F-45** 2026-11-01: **the app runs on graceloader's 8 kB main-task stack,
+  so a big local is a crash, not a warning.** The badge died with *Stack
+  protection fault* right after a title-menu choice; the emulator, which runs
+  the same code on a normal multi-megabyte thread, never noticed. The frame
+  loop is the main task, and `sdkconfig_tanmatsu` sets
+  `CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192`. `handle_cmd()` carried a 22,736-byte
+  frame -- one `nisp_mission_t` (22,424 B), two `nisp_game_t`, three
+  `nisp_design_t` -- so *every* menu selection overflowed before the guard
+  tripped inside the save path. Fixed by moving those temporaries to
+  file-scope `static`s (`main/main.c`, `flight/physics.c`, `flight/mission.c`,
+  `flight/archive.c`, `engineering/sheet.c`, `save/save.c`, `rocket/design.c`)
+  and by rewriting `nisp_stack_split()` so the controlled fragment is just
+  `s->count = index` and the tail is written straight into the caller's
+  `other` (`rocket/stack.c`). Rule: `nisp_mission_t`, `nisp_vessel_t`,
+  `nisp_stack_t` and the 1 kB text buffers are never locals. The guard is
+  `make stackusage` (`-fstack-usage` on `app_obj`, budget 2,048 B per frame);
+  the largest frame now is 960 B.
 
 ### Decisions
 
@@ -2402,6 +2440,10 @@ document if it ever happens:
   not afterwards.
 - `tools/emutests.txt` -- the emulator test manifest: what `make emu-test`
   runs. A test gets added by editing this file, never by typing a command.
+- the `upstream` remote, `git@github.com:nullislandspace/tanmatsu-template-grace.git`
+  -- this app is a fork of the app template, and the loader's exported API
+  arrives through it (F-44). `git fetch upstream && git merge upstream/main`
+  is how a graceloader change reaches the app.
 - `../virtual-tanmatsu-graceloader/Makefile` -- `nisp` in its app list, and the
   staging that reads this repo's `metadata.json` (D-40).
 - `../virtual-tanmatsu-graceloader/src/shims/console_shim.c` -- the emulator's
